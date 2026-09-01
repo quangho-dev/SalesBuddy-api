@@ -1,7 +1,7 @@
 services:
   redis:
     image: redis:7-alpine
-    container_name: redis
+    container_name: sales-buddy-redis
     ports:
       - "6379:6379"
     volumes:
@@ -24,8 +24,11 @@ services:
       - "8000:8000"
     env_file:
       - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       REDIS_URL: redis://redis:6379/0
+      SUPABASE_API_URL: http://host.docker.internal:54321
       WATCHFILES_FORCE_POLLING: "true"
     volumes:
       - ./src:/app/src
@@ -44,8 +47,11 @@ services:
     image: sales-buddy-api:1.0.0
     env_file:
       - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       REDIS_URL: redis://redis:6379/0
+      SUPABASE_API_URL: http://host.docker.internal:54321
       WATCHFILES_FORCE_POLLING: "true"
     volumes:
       - ./src:/app/src
