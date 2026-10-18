@@ -1,17 +1,23 @@
 from datetime import datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from src.services.clerkAuth import get_current_user_clerk_id
 from src.services.customers import (
+    CustomerImportError,
     CustomerNotFoundError,
+    build_customer_template,
     create_customer,
     delete_customer,
     get_customer,
+    import_customers_from_xlsx,
     list_customers,
     update_customer,
 )
+
+MAX_IMPORT_BYTES = 5 * 1024 * 1024
 
 router = APIRouter(tags=["customerRoutes"])
 
@@ -57,6 +63,46 @@ async def list_all_customers(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to list customers: {str(e)}",
+        )
+
+
+@router.get("/template")
+async def download_customer_template(
+    user_clerk_id: str = Depends(get_current_user_clerk_id),
+):
+    content = build_customer_template()
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": 'attachment; filename="mau-khach-hang.xlsx"'
+        },
+    )
+
+
+@router.post("/import")
+async def import_customers(
+    user_clerk_id: str = Depends(get_current_user_clerk_id),
+    file: UploadFile = File(...),
+):
+    filename = (file.filename or "").lower()
+    if not filename.endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .xlsx")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="File Excel trống")
+    if len(content) > MAX_IMPORT_BYTES:
+        raise HTTPException(status_code=400, detail="File Excel vượt quá 5MB")
+
+    try:
+        return import_customers_from_xlsx(user_clerk_id, content)
+    except CustomerImportError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to import customers: {str(e)}",
         )
 
 
