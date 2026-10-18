@@ -1,8 +1,8 @@
 from src.services.supabase import supabase
+from src.services.users import ensure_user
 
 TABLE = "target_customers"
 LIST_TABLE = "target_customer_list"
-USERS_TABLE = "users"
 FIELDS = (
     "name",
     "summary_about_the_target_customer",
@@ -19,19 +19,6 @@ def _to_row(customer: dict, list_id: str) -> dict:
         **{field: customer.get(field) or "" for field in FIELDS},
         "target_customer_list_id": list_id,
     }
-
-
-def ensure_user(clerk_id: str) -> None:
-    existing = (
-        supabase.table(USERS_TABLE)
-        .select("clerk_id")
-        .eq("clerk_id", clerk_id)
-        .limit(1)
-        .execute()
-    )
-    if existing.data:
-        return
-    supabase.table(USERS_TABLE).insert({"clerk_id": clerk_id}).execute()
 
 
 def create_target_customer_list(

@@ -32,6 +32,7 @@ services:
       WATCHFILES_FORCE_POLLING: "true"
     volumes:
       - ./src:/app/src
+      - /Users/admin/.gmail-mcp:/Users/admin/.gmail-mcp
     command: >
       uv run uvicorn src.server:app
       --host 0.0.0.0

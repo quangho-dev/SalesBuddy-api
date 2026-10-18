@@ -2,6 +2,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from src.routes.userRoutes import router as userRoutes
 from src.routes.targetCustomersRoutes import router as targetCustomersRoutes
+from src.routes.productsRoutes import router as productsRoutes
+from src.routes.chatRoutes import router as chatRoutes
+from src.routes.customerRoutes import router as customerRoutes
 
 # Create FastAPI app
 app = FastAPI(
@@ -9,7 +12,6 @@ app = FastAPI(
     description="Backend API for Sales Buddy",
     version="1.0.0",
 )
-
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
@@ -21,6 +23,9 @@ app.add_middleware(
 
 app.include_router(userRoutes, prefix="/api/user")
 app.include_router(targetCustomersRoutes, prefix="/api/target-customers")
+app.include_router(productsRoutes, prefix="/api/products")
+app.include_router(chatRoutes, prefix="/api/chat")
+app.include_router(customerRoutes, prefix="/api/customers")
 
 @app.get("/health")
 async def health_check():
