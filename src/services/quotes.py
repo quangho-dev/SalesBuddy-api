@@ -1,12 +1,13 @@
 from datetime import datetime, timezone
 
 from src.services.customers import get_customer
+from src.services.orders import create_order
 from src.services.supabase import supabase
 from src.services.users import ensure_user
 
 TABLE = "quotes"
 ITEMS_TABLE = "quote_items"
-CUSTOMER_EMBED = "id, company_name, contact_person, phone_number, address"
+CUSTOMER_EMBED = "id, company_name, contact_person, phone_number, address, tax_code"
 SELECT_FIELDS = f"*, customers({CUSTOMER_EMBED}), quote_items(*)"
 ITEM_FIELDS = (
     "id",
@@ -242,6 +243,20 @@ def save_quote_drive_file(
     if not result.data:
         raise QuoteNotFoundError("Quote not found")
     return get_quote(quote_id, clerk_id)
+
+
+def convert_quote_to_order(quote_id: str, clerk_id: str) -> dict:
+    quote = get_quote(quote_id, clerk_id)
+    return create_order(
+        clerk_id,
+        {
+            "customer_id": quote.get("customer_id"),
+            "notes": quote.get("notes") or "",
+            "items": quote.get("items") or [],
+            "is_paid": False,
+            "quote_id": quote_id,
+        },
+    )
 
 
 def delete_quote(quote_id: str, clerk_id: str) -> dict:

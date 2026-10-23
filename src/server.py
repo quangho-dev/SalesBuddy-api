@@ -7,6 +7,7 @@ from src.routes.chatRoutes import router as chatRoutes
 from src.routes.customerRoutes import router as customerRoutes
 from src.routes.orderRoutes import router as orderRoutes
 from src.routes.quoteRoutes import router as quoteRoutes
+from src.routes.paymentRoutes import router as paymentRoutes
 
 # Create FastAPI app
 app = FastAPI(
@@ -30,6 +31,7 @@ app.include_router(chatRoutes, prefix="/api/chat")
 app.include_router(customerRoutes, prefix="/api/customers")
 app.include_router(orderRoutes, prefix="/api/orders")
 app.include_router(quoteRoutes, prefix="/api/quotes")
+app.include_router(paymentRoutes, prefix="/api/payments")
 
 @app.get("/health")
 async def health_check():

@@ -1,0 +1,2 @@
+ALTER TABLE customers
+    ADD COLUMN IF NOT EXISTS tax_code TEXT NOT NULL DEFAULT '';

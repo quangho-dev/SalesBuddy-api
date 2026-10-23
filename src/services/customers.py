@@ -14,6 +14,7 @@ FIELDS = (
     "contact_person",
     "address",
     "phone_number",
+    "tax_code",
     "website",
     "facebook",
     "zalo",
@@ -33,6 +34,7 @@ TEMPLATE_HEADERS = (
     "Tên công ty",
     "Điện thoại",
     "Người liên hệ",
+    "Mã số thuế",
 )
 
 HEADER_ALIASES = {
@@ -57,6 +59,13 @@ HEADER_ALIASES = {
         "contact",
         "contact person",
         "lien he",
+    },
+    "tax_code": {
+        "ma so thue",
+        "mst",
+        "tax code",
+        "tax id",
+        "vat",
     },
 }
 
@@ -98,7 +107,21 @@ def _normalize_interactions(items: list | None) -> list[dict]:
                 "created_at": created_at,
             }
         )
-    return normalized
+    return _sort_interactions(normalized)
+
+
+def _interaction_time(item: dict) -> str:
+    return str(item.get("created_at") or "")
+
+
+def _sort_interactions(items: list | None) -> list[dict]:
+    rows = [item for item in (items or []) if isinstance(item, dict)]
+    return sorted(rows, key=_interaction_time, reverse=True)
+
+
+def _format_customer(row: dict) -> dict:
+    row["interaction_history"] = _sort_interactions(row.get("interaction_history"))
+    return row
 
 
 def _to_row(payload: dict, clerk_id: str, *, include_history: bool) -> dict:
@@ -179,7 +202,7 @@ def create_customers(clerk_id: str, payloads: list[dict]) -> list[dict]:
             for item in payloads[start : start + INSERT_CHUNK_SIZE]
         ]
         result = supabase.table(TABLE).insert(chunk).execute()
-        saved.extend(result.data or [])
+        saved.extend(_format_customer(row) for row in (result.data or []))
     return saved
 
 
@@ -200,7 +223,7 @@ def import_customers_from_xlsx(clerk_id: str, content: bytes) -> dict:
         mapping = _map_headers(headers or ())
         if not mapping:
             raise CustomerImportError(
-                "Không nhận diện được cột. Hãy dùng file mẫu (Tên công ty, Điện thoại, Người liên hệ)."
+                "Không nhận diện được cột. Hãy dùng file mẫu (Tên công ty, Điện thoại, Người liên hệ, Mã số thuế)."
             )
 
         payloads = []
@@ -245,7 +268,7 @@ def create_customer(clerk_id: str, payload: dict) -> dict:
     )
     if not result.data:
         raise RuntimeError("Failed to create customer")
-    return result.data[0]
+    return _format_customer(result.data[0])
 
 
 def list_customers(clerk_id: str) -> list[dict]:
@@ -256,7 +279,7 @@ def list_customers(clerk_id: str) -> list[dict]:
         .order("created_at", desc=True)
         .execute()
     )
-    return result.data or []
+    return [_format_customer(row) for row in (result.data or [])]
 
 
 def get_customer(customer_id: str, clerk_id: str) -> dict:
@@ -264,7 +287,7 @@ def get_customer(customer_id: str, clerk_id: str) -> dict:
     data = result.data or []
     if not data:
         raise CustomerNotFoundError("Customer not found")
-    return data[0]
+    return _format_customer(data[0])
 
 
 def update_customer(customer_id: str, clerk_id: str, payload: dict) -> dict:
@@ -291,7 +314,7 @@ def update_customer(customer_id: str, clerk_id: str, payload: dict) -> dict:
     )
     if not result.data:
         raise CustomerNotFoundError("Customer not found")
-    return result.data[0]
+    return _format_customer(result.data[0])
 
 
 def delete_customer(customer_id: str, clerk_id: str) -> dict:

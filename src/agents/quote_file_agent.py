@@ -154,7 +154,8 @@ def build_quote_file_info(clerk_id: str, payload: dict) -> dict:
             or _text(quote_customer.get("address")),
             "phone_number": _text(customer_payload.get("phone_number"))
             or _text(quote_customer.get("phone_number")),
-            "tax_code": _text(customer_payload.get("tax_code")),
+            "tax_code": _text(customer_payload.get("tax_code"))
+            or _text(quote_customer.get("tax_code")),
             "email": _text(customer_payload.get("email")),
         },
         "notes": _text(payload.get("notes"))

@@ -3,8 +3,10 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from src.agents.order_file_agent import generate_order_file
 from src.services.clerkAuth import get_current_user_clerk_id
 from src.services.customers import CustomerNotFoundError
+from src.services.googleDrive import QuoteTemplateNotFoundError
 from src.services.orders import (
     OrderNotFoundError,
     create_order,
@@ -30,6 +32,7 @@ class CreateOrderRequest(BaseModel):
     customer_id: UUID
     order_date: date | None = None
     notes: str = ""
+    is_paid: bool = False
     items: list[OrderItemInput] = Field(min_length=1)
 
 
@@ -37,24 +40,71 @@ class UpdateOrderRequest(BaseModel):
     customer_id: UUID | None = None
     order_date: date | None = None
     notes: str | None = None
+    is_paid: bool | None = None
     items: list[OrderItemInput] | None = None
+
+
+class OrderFileCustomerInput(BaseModel):
+    company_name: str | None = None
+    contact_person: str = ""
+    address: str = ""
+    phone_number: str = ""
+    tax_code: str = ""
+    email: str = ""
+
+
+class GenerateOrderFileRequest(BaseModel):
+    order_id: UUID | None = None
+    customer: OrderFileCustomerInput | None = None
+    notes: str | None = None
+    items: list[OrderItemInput] | None = None
+    order_number: str | None = None
+    order_date: str | None = None
 
 
 @router.get("")
 @router.get("/")
 async def list_all_orders(
     customer_id: UUID | None = Query(default=None),
+    is_paid: bool | None = Query(default=None),
     user_clerk_id: str = Depends(get_current_user_clerk_id),
 ):
     try:
         return list_orders(
             user_clerk_id,
             customer_id=str(customer_id) if customer_id else None,
+            is_paid=is_paid,
         )
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail=f"Failed to list orders: {str(e)}",
+        )
+
+
+@router.post("/generate-file")
+async def generate_order_spreadsheet(
+    body: GenerateOrderFileRequest,
+    user_clerk_id: str = Depends(get_current_user_clerk_id),
+):
+    payload = body.model_dump()
+    if not payload.get("order_id") and not payload.get("items"):
+        raise HTTPException(
+            status_code=400,
+            detail="order_id or items is required",
+        )
+    try:
+        return await generate_order_file(user_clerk_id, payload)
+    except OrderNotFoundError:
+        raise HTTPException(status_code=404, detail="Order not found")
+    except QuoteTemplateNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate order file: {str(e)}",
         )
 
 

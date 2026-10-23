@@ -12,6 +12,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 QUOTE_TEMPLATE_NAME = os.getenv("QUOTE_TEMPLATE_NAME", "bao-gia.xls")
+ORDER_TEMPLATE_NAME = os.getenv("ORDER_TEMPLATE_NAME", "don-hang.xls")
 QUOTE_OUTPUT_FOLDER_ID = os.getenv(
     "QUOTE_OUTPUT_FOLDER_ID", "13v2sghRxWyYvuvGz9v9NPFd10oiq2yv3"
 )
@@ -70,7 +71,7 @@ def sheets_service():
 def find_quote_template(name: str = QUOTE_TEMPLATE_NAME) -> dict:
     path = quote_template_path(name)
     if not os.path.isfile(path):
-        raise QuoteTemplateNotFoundError(f"Quote template not found at {path}")
+        raise QuoteTemplateNotFoundError(f"Template not found at {path}")
     return {
         "id": path,
         "name": os.path.basename(path),
@@ -97,7 +98,7 @@ def copy_quote_template(title: str, template_name: str = QUOTE_TEMPLATE_NAME) ->
         .execute()
     )
     if not copied.get("id"):
-        raise RuntimeError("Failed to copy quote template")
+        raise RuntimeError("Failed to copy spreadsheet template")
     return {
         "id": copied["id"],
         "name": copied.get("name") or title,

@@ -82,7 +82,9 @@ def _read_rows(sheets, spreadsheet_id: str, sheet_name: str) -> list[list]:
     return result.get("values") or []
 
 
-def _keep_filled_sheet(sheets, spreadsheet_id: str, keep_sheet_id: int) -> str:
+def _keep_filled_sheet(
+    sheets, spreadsheet_id: str, keep_sheet_id: int, keep_title: str
+) -> str:
     spreadsheet = sheets.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
     requests = []
     for sheet in spreadsheet.get("sheets") or []:
@@ -95,7 +97,7 @@ def _keep_filled_sheet(sheets, spreadsheet_id: str, keep_sheet_id: int) -> str:
             "updateSheetProperties": {
                 "properties": {
                     "sheetId": keep_sheet_id,
-                    "title": "Báo giá",
+                    "title": keep_title,
                     "index": 0,
                 },
                 "fields": "title,index",
@@ -106,10 +108,12 @@ def _keep_filled_sheet(sheets, spreadsheet_id: str, keep_sheet_id: int) -> str:
         spreadsheetId=spreadsheet_id,
         body={"requests": requests},
     ).execute()
-    return "Báo giá"
+    return keep_title
 
 
-def fill_quote_spreadsheet(spreadsheet_id: str, info: dict) -> str:
+def fill_quote_spreadsheet(
+    spreadsheet_id: str, info: dict, keep_title: str = "Báo giá"
+) -> str:
     items = info.get("items") or []
     if not items:
         raise ValueError("items is required")
@@ -228,11 +232,15 @@ def fill_quote_spreadsheet(spreadsheet_id: str, info: dict) -> str:
     updates = [
         {
             "range": _a1(sheet_name, "B8"),
-            "values": [[f"(Số :     {info.get('quote_number') or ''})"]],
+            "values": [[
+                f"(Số :     {info.get('document_number') or info.get('quote_number') or ''})"
+            ]],
         },
         {
             "range": _a1(sheet_name, "D8"),
-            "values": [[info.get("quote_date_text") or ""]],
+            "values": [[
+                info.get("date_text") or info.get("quote_date_text") or ""
+            ]],
         },
         {
             "range": _a1(sheet_name, "A10"),
@@ -289,4 +297,4 @@ def fill_quote_spreadsheet(spreadsheet_id: str, info: dict) -> str:
         spreadsheetId=spreadsheet_id,
         body={"valueInputOption": "USER_ENTERED", "data": updates},
     ).execute()
-    return _keep_filled_sheet(sheets, spreadsheet_id, sheet_id)
+    return _keep_filled_sheet(sheets, spreadsheet_id, sheet_id, keep_title)

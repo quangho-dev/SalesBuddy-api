@@ -6,7 +6,7 @@ from src.services.users import ensure_user
 
 TABLE = "orders"
 ITEMS_TABLE = "order_items"
-CUSTOMER_EMBED = "id, company_name, contact_person, phone_number"
+CUSTOMER_EMBED = "id, company_name, contact_person, phone_number, address, tax_code"
 SELECT_FIELDS = f"*, customers({CUSTOMER_EMBED}), order_items(*)"
 ITEM_FIELDS = (
     "id",
@@ -97,12 +97,17 @@ def _to_order_row(payload: dict, clerk_id: str) -> dict:
     if not customer_id:
         raise ValueError("customer_id is required")
     _owned_customer(customer_id, clerk_id)
-    return {
+    row = {
         "clerk_id": clerk_id,
         "customer_id": customer_id,
         "order_date": _date(payload.get("order_date")),
         "notes": _text(payload.get("notes")),
+        "is_paid": _bool(payload.get("is_paid")),
     }
+    quote_id = str(payload.get("quote_id") or "").strip()
+    if quote_id:
+        row["quote_id"] = quote_id
+    return row
 
 
 def _format_order(row: dict) -> dict:
@@ -111,6 +116,7 @@ def _format_order(row: dict) -> dict:
     row["items"] = [
         {field: item.get(field) for field in ITEM_FIELDS} for item in items
     ]
+    row["is_paid"] = _bool(row.get("is_paid"))
     return row
 
 
@@ -153,7 +159,11 @@ def create_order(clerk_id: str, payload: dict) -> dict:
     return get_order(order_id, clerk_id)
 
 
-def list_orders(clerk_id: str, customer_id: str | None = None) -> list[dict]:
+def list_orders(
+    clerk_id: str,
+    customer_id: str | None = None,
+    is_paid: bool | None = None,
+) -> list[dict]:
     query = (
         supabase.table(TABLE)
         .select(SELECT_FIELDS)
@@ -163,6 +173,8 @@ def list_orders(clerk_id: str, customer_id: str | None = None) -> list[dict]:
     )
     if customer_id:
         query = query.eq("customer_id", customer_id)
+    if is_paid is not None:
+        query = query.eq("is_paid", is_paid)
     result = query.execute()
     return [_format_order(row) for row in (result.data or [])]
 
@@ -187,6 +199,8 @@ def update_order(order_id: str, clerk_id: str, payload: dict) -> dict:
         updates["order_date"] = _date(payload["order_date"])
     if "notes" in payload and payload["notes"] is not None:
         updates["notes"] = _text(payload["notes"])
+    if "is_paid" in payload and payload["is_paid"] is not None:
+        updates["is_paid"] = _bool(payload["is_paid"])
 
     items = None
     if "items" in payload and payload["items"] is not None:
@@ -207,6 +221,33 @@ def update_order(order_id: str, clerk_id: str, payload: dict) -> dict:
         raise OrderNotFoundError("Order not found")
     if items is not None:
         _replace_items(order_id, items)
+    return get_order(order_id, clerk_id)
+
+
+def save_order_drive_file(
+    order_id: str,
+    clerk_id: str,
+    file_id: str,
+    file_name: str,
+    web_link: str,
+) -> dict:
+    get_order(order_id, clerk_id)
+    result = (
+        supabase.table(TABLE)
+        .update(
+            {
+                "drive_file_id": _text(file_id),
+                "drive_file_name": _text(file_name),
+                "drive_web_link": _text(web_link),
+                "updated_at": _now(),
+            }
+        )
+        .eq("id", order_id)
+        .eq("clerk_id", clerk_id)
+        .execute()
+    )
+    if not result.data:
+        raise OrderNotFoundError("Order not found")
     return get_order(order_id, clerk_id)
 
 

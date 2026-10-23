@@ -8,6 +8,7 @@ from src.services.customers import CustomerNotFoundError
 from src.services.googleDrive import QuoteTemplateNotFoundError
 from src.services.quotes import (
     QuoteNotFoundError,
+    convert_quote_to_order,
     create_quote,
     delete_quote,
     get_quote,
@@ -98,6 +99,26 @@ async def generate_quote_spreadsheet(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to generate quote file: {str(e)}",
+        )
+
+
+@router.post("/{quote_id}/convert-to-order")
+async def convert_quote_into_order(
+    quote_id: UUID,
+    user_clerk_id: str = Depends(get_current_user_clerk_id),
+):
+    try:
+        return convert_quote_to_order(str(quote_id), user_clerk_id)
+    except QuoteNotFoundError:
+        raise HTTPException(status_code=404, detail="Quote not found")
+    except CustomerNotFoundError:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to convert quote to order: {str(e)}",
         )
 
 

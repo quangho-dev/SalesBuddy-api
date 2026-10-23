@@ -33,6 +33,7 @@ class CreateCustomerRequest(BaseModel):
     contact_person: str = ""
     address: str = ""
     phone_number: str = ""
+    tax_code: str = ""
     website: str = ""
     facebook: str = ""
     zalo: str = ""
@@ -45,6 +46,7 @@ class UpdateCustomerRequest(BaseModel):
     contact_person: str | None = None
     address: str | None = None
     phone_number: str | None = None
+    tax_code: str | None = None
     website: str | None = None
     facebook: str | None = None
     zalo: str | None = None
