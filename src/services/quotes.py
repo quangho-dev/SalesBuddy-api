@@ -7,7 +7,7 @@ from src.services.users import ensure_user
 
 TABLE = "quotes"
 ITEMS_TABLE = "quote_items"
-CUSTOMER_EMBED = "id, company_name, contact_person, phone_number, address, tax_code"
+CUSTOMER_EMBED = "id, company_name, contact_person, phone_number, address, tax_code, payment_term_days"
 SELECT_FIELDS = f"*, customers({CUSTOMER_EMBED}), quote_items(*)"
 ITEM_FIELDS = (
     "id",

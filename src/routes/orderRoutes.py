@@ -1,4 +1,5 @@
 from datetime import date
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -18,6 +19,8 @@ from src.services.orders import (
 
 router = APIRouter(tags=["orderRoutes"])
 
+PaymentMethod = Literal["cash", "bank_transfer"]
+
 
 class OrderItemInput(BaseModel):
     product_name: str = Field(min_length=1)
@@ -33,6 +36,8 @@ class CreateOrderRequest(BaseModel):
     order_date: date | None = None
     notes: str = ""
     is_paid: bool = False
+    payment_method: PaymentMethod | None = None
+    paid_amount: float = Field(default=0, ge=0)
     items: list[OrderItemInput] = Field(min_length=1)
 
 
@@ -41,6 +46,8 @@ class UpdateOrderRequest(BaseModel):
     order_date: date | None = None
     notes: str | None = None
     is_paid: bool | None = None
+    payment_method: PaymentMethod | None = None
+    paid_amount: float | None = Field(default=None, ge=0)
     items: list[OrderItemInput] | None = None
 
 

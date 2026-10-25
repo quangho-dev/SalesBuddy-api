@@ -34,6 +34,7 @@ class CreateCustomerRequest(BaseModel):
     address: str = ""
     phone_number: str = ""
     tax_code: str = ""
+    payment_term_days: int | None = Field(default=None, ge=0)
     website: str = ""
     facebook: str = ""
     zalo: str = ""
@@ -47,6 +48,7 @@ class UpdateCustomerRequest(BaseModel):
     address: str | None = None
     phone_number: str | None = None
     tax_code: str | None = None
+    payment_term_days: int | None = Field(default=None, ge=0)
     website: str | None = None
     facebook: str | None = None
     zalo: str | None = None
@@ -132,6 +134,8 @@ async def add_customer(
 ):
     try:
         return create_customer(user_clerk_id, body.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -153,6 +157,8 @@ async def edit_customer(
         return update_customer(str(customer_id), user_clerk_id, payload)
     except CustomerNotFoundError:
         raise HTTPException(status_code=404, detail="Customer not found")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(
             status_code=500,

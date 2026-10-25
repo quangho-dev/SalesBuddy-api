@@ -5,11 +5,12 @@ import re
 import unicodedata
 
 from openpyxl import Workbook, load_workbook
+from src.services.settings import get_settings
 from src.services.supabase import supabase
 from src.services.users import ensure_user
 
 TABLE = "customers"
-FIELDS = (
+TEXT_FIELDS = (
     "company_name",
     "contact_person",
     "address",
@@ -20,6 +21,8 @@ FIELDS = (
     "zalo",
     "notes",
 )
+INT_FIELDS = ("payment_term_days",)
+FIELDS = TEXT_FIELDS + INT_FIELDS
 
 
 class CustomerNotFoundError(LookupError):
@@ -35,6 +38,7 @@ TEMPLATE_HEADERS = (
     "Điện thoại",
     "Người liên hệ",
     "Mã số thuế",
+    "Hạn công nợ (ngày)",
 )
 
 HEADER_ALIASES = {
@@ -67,6 +71,14 @@ HEADER_ALIASES = {
         "tax id",
         "vat",
     },
+    "payment_term_days": {
+        "han cong no",
+        "han cong no ngay",
+        "so ngay no",
+        "payment term",
+        "credit days",
+        "debt term",
+    },
 }
 
 INSERT_CHUNK_SIZE = 100
@@ -80,6 +92,18 @@ def _text(value) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def _nonneg_int(value, default: int = 0) -> int:
+    if value is None or value == "":
+        return default
+    try:
+        number = int(round(float(str(value).strip().replace(",", "."))))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("payment_term_days must be a number") from exc
+    if number < 0:
+        raise ValueError("payment_term_days must be >= 0")
+    return number
 
 
 def _normalize_interactions(items: list | None) -> list[dict]:
@@ -121,11 +145,22 @@ def _sort_interactions(items: list | None) -> list[dict]:
 
 def _format_customer(row: dict) -> dict:
     row["interaction_history"] = _sort_interactions(row.get("interaction_history"))
+    row["payment_term_days"] = _nonneg_int(row.get("payment_term_days"))
     return row
 
 
-def _to_row(payload: dict, clerk_id: str, *, include_history: bool) -> dict:
-    row = {field: _text(payload.get(field)) for field in FIELDS}
+def _to_row(
+    payload: dict,
+    clerk_id: str,
+    *,
+    include_history: bool,
+    default_payment_term_days: int,
+) -> dict:
+    row = {field: _text(payload.get(field)) for field in TEXT_FIELDS}
+    row["payment_term_days"] = _nonneg_int(
+        payload.get("payment_term_days"),
+        default_payment_term_days,
+    )
     row["clerk_id"] = clerk_id
     if include_history:
         row["interaction_history"] = _normalize_interactions(
@@ -179,26 +214,36 @@ def _map_headers(headers: tuple) -> dict[int, str]:
 
 
 def _row_payload(values: tuple, mapping: dict[int, str]) -> dict:
-    payload = {field: "" for field in FIELDS}
+    payload = {field: "" for field in TEXT_FIELDS}
+    payload["payment_term_days"] = None
     for index, field in mapping.items():
         if index >= len(values):
             continue
-        payload[field] = _cell_text(values[index])
+        text = _cell_text(values[index])
+        if field == "payment_term_days" and text == "":
+            continue
+        payload[field] = text
     return payload
 
 
 def _is_empty_payload(payload: dict) -> bool:
-    return not any(_text(payload.get(field)) for field in FIELDS)
+    return not any(_text(payload.get(field)) for field in TEXT_FIELDS)
 
 
 def create_customers(clerk_id: str, payloads: list[dict]) -> list[dict]:
     if not payloads:
         return []
     ensure_user(clerk_id)
+    default_days = get_settings(clerk_id)["default_payment_term_days"]
     saved = []
     for start in range(0, len(payloads), INSERT_CHUNK_SIZE):
         chunk = [
-            _to_row(item, clerk_id, include_history=True)
+            _to_row(
+                item,
+                clerk_id,
+                include_history=True,
+                default_payment_term_days=default_days,
+            )
             for item in payloads[start : start + INSERT_CHUNK_SIZE]
         ]
         result = supabase.table(TABLE).insert(chunk).execute()
@@ -261,9 +306,17 @@ def build_customer_template() -> bytes:
 
 def create_customer(clerk_id: str, payload: dict) -> dict:
     ensure_user(clerk_id)
+    default_days = get_settings(clerk_id)["default_payment_term_days"]
     result = (
         supabase.table(TABLE)
-        .insert(_to_row(payload, clerk_id, include_history=True))
+        .insert(
+            _to_row(
+                payload,
+                clerk_id,
+                include_history=True,
+                default_payment_term_days=default_days,
+            )
+        )
         .execute()
     )
     if not result.data:
@@ -294,9 +347,11 @@ def update_customer(customer_id: str, clerk_id: str, payload: dict) -> dict:
     get_customer(customer_id, clerk_id)
 
     updates = {}
-    for field in FIELDS:
+    for field in TEXT_FIELDS:
         if field in payload and payload[field] is not None:
             updates[field] = _text(payload[field])
+    if "payment_term_days" in payload and payload["payment_term_days"] is not None:
+        updates["payment_term_days"] = _nonneg_int(payload["payment_term_days"])
     if "interaction_history" in payload and payload["interaction_history"] is not None:
         updates["interaction_history"] = _normalize_interactions(
             payload["interaction_history"]

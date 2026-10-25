@@ -6,7 +6,8 @@ from src.services.users import ensure_user
 
 TABLE = "orders"
 ITEMS_TABLE = "order_items"
-CUSTOMER_EMBED = "id, company_name, contact_person, phone_number, address, tax_code"
+VAT_RATE = 0.1
+CUSTOMER_EMBED = "id, company_name, contact_person, phone_number, address, tax_code, payment_term_days"
 SELECT_FIELDS = f"*, customers({CUSTOMER_EMBED}), order_items(*)"
 ITEM_FIELDS = (
     "id",
@@ -37,6 +38,33 @@ def _number(value) -> float:
     if value is None or value == "":
         return 0
     return float(value)
+
+
+PAYMENT_METHODS = {
+    "cash": "cash",
+    "tien mat": "cash",
+    "tiền mặt": "cash",
+    "bank_transfer": "bank_transfer",
+    "chuyen khoan": "bank_transfer",
+    "chuyển khoản": "bank_transfer",
+    "transfer": "bank_transfer",
+}
+
+
+def _payment_method(value):
+    if value is None or str(value).strip() == "":
+        return None
+    method = PAYMENT_METHODS.get(str(value).strip().lower())
+    if not method:
+        raise ValueError("payment_method must be cash or bank_transfer")
+    return method
+
+
+def _paid_amount(value) -> float:
+    amount = _number(value)
+    if amount < 0:
+        raise ValueError("paid_amount must be >= 0")
+    return amount
 
 
 def _bool(value) -> bool:
@@ -103,6 +131,8 @@ def _to_order_row(payload: dict, clerk_id: str) -> dict:
         "order_date": _date(payload.get("order_date")),
         "notes": _text(payload.get("notes")),
         "is_paid": _bool(payload.get("is_paid")),
+        "payment_method": _payment_method(payload.get("payment_method")),
+        "paid_amount": _paid_amount(payload.get("paid_amount")),
     }
     quote_id = str(payload.get("quote_id") or "").strip()
     if quote_id:
@@ -117,6 +147,8 @@ def _format_order(row: dict) -> dict:
         {field: item.get(field) for field in ITEM_FIELDS} for item in items
     ]
     row["is_paid"] = _bool(row.get("is_paid"))
+    row["payment_method"] = _payment_method(row.get("payment_method"))
+    row["paid_amount"] = _paid_amount(row.get("paid_amount"))
     return row
 
 
@@ -130,6 +162,47 @@ def _owned_query(order_id: str, clerk_id: str):
     )
 
 
+def _items_grand(items: list[dict]) -> float:
+    total = 0.0
+    for item in items:
+        line = float(item.get("quantity") or 0) * float(item.get("selling_price") or 0)
+        if item.get("vat_invoice"):
+            line += round(line * VAT_RATE)
+        total += line
+    return total
+
+
+def _payment_to_record(payload: dict, items: list[dict]) -> dict | None:
+    if not _bool(payload.get("is_paid")):
+        return None
+    method = _payment_method(payload.get("payment_method"))
+    if not method:
+        raise ValueError("Hãy chọn hình thức thanh toán trước khi đánh dấu đã thanh toán.")
+    amount = _paid_amount(payload.get("paid_amount"))
+    if amount <= 0:
+        amount = _items_grand(items)
+    if amount <= 0:
+        raise ValueError("Tổng số tiền thanh toán phải lớn hơn 0.")
+    return {"payment_method": method, "amount": amount}
+
+
+def _insert_payment(clerk_id: str, order_id: str, payment: dict) -> None:
+    from src.services.payments import create_payment
+
+    create_payment(
+        clerk_id,
+        {
+            "order_id": order_id,
+            "amount": payment["amount"],
+            "payment_method": payment["payment_method"],
+        },
+    )
+
+
+def _delete_order_payments(order_id: str) -> None:
+    supabase.table("payments").delete().eq("order_id", order_id).execute()
+
+
 def _replace_items(order_id: str, items: list[dict]) -> None:
     supabase.table(ITEMS_TABLE).delete().eq("order_id", order_id).execute()
     rows = [{**item, "order_id": order_id} for item in items]
@@ -141,6 +214,13 @@ def _replace_items(order_id: str, items: list[dict]) -> None:
 def create_order(clerk_id: str, payload: dict) -> dict:
     ensure_user(clerk_id)
     items = _normalize_items(payload.get("items"))
+    payment = _payment_to_record(payload, items)
+    if payment:
+        payload = {
+            **payload,
+            "payment_method": payment["payment_method"],
+            "paid_amount": payment["amount"],
+        }
     result = (
         supabase.table(TABLE)
         .insert(_to_order_row(payload, clerk_id))
@@ -151,7 +231,10 @@ def create_order(clerk_id: str, payload: dict) -> dict:
     order_id = result.data[0]["id"]
     try:
         _replace_items(order_id, items)
+        if payment:
+            _insert_payment(clerk_id, order_id, payment)
     except Exception:
+        supabase.table("payments").delete().eq("order_id", order_id).execute()
         supabase.table(TABLE).delete().eq("id", order_id).eq(
             "clerk_id", clerk_id
         ).execute()
@@ -188,7 +271,8 @@ def get_order(order_id: str, clerk_id: str) -> dict:
 
 
 def update_order(order_id: str, clerk_id: str, payload: dict) -> dict:
-    get_order(order_id, clerk_id)
+    existing = get_order(order_id, clerk_id)
+    was_paid = bool(existing.get("is_paid"))
 
     updates = {}
     if "customer_id" in payload and payload["customer_id"] is not None:
@@ -201,10 +285,37 @@ def update_order(order_id: str, clerk_id: str, payload: dict) -> dict:
         updates["notes"] = _text(payload["notes"])
     if "is_paid" in payload and payload["is_paid"] is not None:
         updates["is_paid"] = _bool(payload["is_paid"])
+    if "payment_method" in payload:
+        updates["payment_method"] = _payment_method(payload.get("payment_method"))
+    if "paid_amount" in payload and payload["paid_amount"] is not None:
+        updates["paid_amount"] = _paid_amount(payload["paid_amount"])
 
     items = None
     if "items" in payload and payload["items"] is not None:
         items = _normalize_items(payload["items"])
+
+    payment = None
+    clear_payments = was_paid and "is_paid" in updates and not updates["is_paid"]
+    if not was_paid:
+        payment_items = items if items is not None else existing.get("items") or []
+        payment_payload = {
+            "is_paid": updates["is_paid"] if "is_paid" in updates else existing.get("is_paid"),
+            "payment_method": (
+                updates["payment_method"]
+                if "payment_method" in updates
+                else existing.get("payment_method")
+            ),
+            "paid_amount": (
+                updates["paid_amount"]
+                if "paid_amount" in updates
+                else existing.get("paid_amount")
+            ),
+        }
+        if "payment_method" in payload or "paid_amount" in payload:
+            payment = _payment_to_record(payment_payload, payment_items)
+            if payment and "is_paid" in payload:
+                updates["payment_method"] = payment["payment_method"]
+                updates["paid_amount"] = payment["amount"]
 
     if not updates and items is None:
         return get_order(order_id, clerk_id)
@@ -221,6 +332,16 @@ def update_order(order_id: str, clerk_id: str, payload: dict) -> dict:
         raise OrderNotFoundError("Order not found")
     if items is not None:
         _replace_items(order_id, items)
+    if payment:
+        try:
+            _insert_payment(clerk_id, order_id, payment)
+        except Exception:
+            supabase.table(TABLE).update(
+                {"is_paid": was_paid, "updated_at": _now()}
+            ).eq("id", order_id).eq("clerk_id", clerk_id).execute()
+            raise
+    if clear_payments:
+        _delete_order_payments(order_id)
     return get_order(order_id, clerk_id)
 
 
