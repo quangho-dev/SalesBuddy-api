@@ -230,6 +230,37 @@ def _is_empty_payload(payload: dict) -> bool:
     return not any(_text(payload.get(field)) for field in TEXT_FIELDS)
 
 
+def _identity_key(company_name, tax_code) -> tuple[str, str] | None:
+    company = re.sub(r"\s+", " ", _text(company_name)).casefold()
+    tax = re.sub(r"[\s.\-]", "", _text(tax_code)).casefold()
+    if not company and not tax:
+        return None
+    return (company, tax)
+
+
+def _existing_customer_keys(clerk_id: str) -> set[tuple[str, str]]:
+    keys: set[tuple[str, str]] = set()
+    page_size = 1000
+    start = 0
+    while True:
+        result = (
+            supabase.table(TABLE)
+            .select("company_name, tax_code")
+            .eq("clerk_id", clerk_id)
+            .range(start, start + page_size - 1)
+            .execute()
+        )
+        rows = result.data or []
+        for row in rows:
+            key = _identity_key(row.get("company_name"), row.get("tax_code"))
+            if key:
+                keys.add(key)
+        if len(rows) < page_size:
+            break
+        start += page_size
+    return keys
+
+
 def create_customers(clerk_id: str, payloads: list[dict]) -> list[dict]:
     if not payloads:
         return []
@@ -273,6 +304,8 @@ def import_customers_from_xlsx(clerk_id: str, content: bytes) -> dict:
 
         payloads = []
         skipped = 0
+        duplicates = 0
+        seen = _existing_customer_keys(clerk_id)
         for values in rows:
             values = values or ()
             if all(value is None or str(value).strip() == "" for value in values):
@@ -282,6 +315,12 @@ def import_customers_from_xlsx(clerk_id: str, content: bytes) -> dict:
             if _is_empty_payload(payload):
                 skipped += 1
                 continue
+            key = _identity_key(payload.get("company_name"), payload.get("tax_code"))
+            if key and key in seen:
+                duplicates += 1
+                continue
+            if key:
+                seen.add(key)
             payloads.append(payload)
     finally:
         workbook.close()
@@ -290,6 +329,7 @@ def import_customers_from_xlsx(clerk_id: str, content: bytes) -> dict:
     return {
         "imported": len(saved),
         "skipped": skipped,
+        "duplicates": duplicates,
         "customers": saved,
     }
 
@@ -374,6 +414,22 @@ def update_customer(customer_id: str, clerk_id: str, payload: dict) -> dict:
 
 def delete_customer(customer_id: str, clerk_id: str) -> dict:
     existing = get_customer(customer_id, clerk_id)
+    # Orders and quotes reference this customer with ON DELETE RESTRICT.
+    # Remove the owner's related rows first. Payments and line items cascade.
+    (
+        supabase.table("orders")
+        .delete()
+        .eq("customer_id", customer_id)
+        .eq("clerk_id", clerk_id)
+        .execute()
+    )
+    (
+        supabase.table("quotes")
+        .delete()
+        .eq("customer_id", customer_id)
+        .eq("clerk_id", clerk_id)
+        .execute()
+    )
     supabase.table(TABLE).delete().eq("id", customer_id).eq(
         "clerk_id", clerk_id
     ).execute()

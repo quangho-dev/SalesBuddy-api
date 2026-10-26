@@ -205,6 +205,37 @@ def _is_empty_payload(payload: dict) -> bool:
     return not has_text and not has_number
 
 
+def _identity_key(product_code, name) -> tuple[str, str] | None:
+    code = re.sub(r"\s+", " ", _text(product_code)).casefold()
+    product_name = re.sub(r"\s+", " ", _text(name)).casefold()
+    if not code and not product_name:
+        return None
+    return (code, product_name)
+
+
+def _existing_product_keys(clerk_id: str) -> set[tuple[str, str]]:
+    keys: set[tuple[str, str]] = set()
+    page_size = 1000
+    start = 0
+    while True:
+        result = (
+            supabase.table(TABLE)
+            .select("product_code, name")
+            .eq("clerk_id", clerk_id)
+            .range(start, start + page_size - 1)
+            .execute()
+        )
+        rows = result.data or []
+        for row in rows:
+            key = _identity_key(row.get("product_code"), row.get("name"))
+            if key:
+                keys.add(key)
+        if len(rows) < page_size:
+            break
+        start += page_size
+    return keys
+
+
 def create_products(clerk_id: str, payloads: list[dict]) -> list[dict]:
     if not payloads:
         return []
@@ -240,6 +271,8 @@ def import_products_from_xlsx(clerk_id: str, content: bytes) -> dict:
         payloads = []
         errors = []
         skipped = 0
+        duplicates = 0
+        seen = _existing_product_keys(clerk_id)
         for row_number, values in enumerate(rows, start=2):
             values = values or ()
             if all(value is None or str(value).strip() == "" for value in values):
@@ -253,6 +286,12 @@ def import_products_from_xlsx(clerk_id: str, content: bytes) -> dict:
             if _is_empty_payload(payload):
                 skipped += 1
                 continue
+            key = _identity_key(payload.get("product_code"), payload.get("name"))
+            if key and key in seen:
+                duplicates += 1
+                continue
+            if key:
+                seen.add(key)
             payloads.append(payload)
     finally:
         workbook.close()
@@ -261,6 +300,7 @@ def import_products_from_xlsx(clerk_id: str, content: bytes) -> dict:
     return {
         "imported": len(saved),
         "skipped": skipped,
+        "duplicates": duplicates,
         "errors": errors,
         "products": saved,
     }
