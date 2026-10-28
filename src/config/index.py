@@ -1,4 +1,6 @@
 import os
+from urllib.parse import urlparse, urlunparse
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -51,8 +53,35 @@ if _langsmith_enabled:
     os.environ["LANGSMITH_PROJECT"] = _langsmith_project
     os.environ["LANGSMITH_ENDPOINT"] = _langsmith_endpoint
 
+def _docker_host_url(url: str, *, in_docker: bool) -> str:
+    """Inside Docker, 127.0.0.1 and localhost are the container, not the host.
+
+    Remote URLs such as https://*.supabase.co stay unchanged, including in production.
+    """
+    if not in_docker:
+        return url
+    parsed = urlparse(url)
+    if parsed.hostname not in {"127.0.0.1", "localhost"}:
+        return url
+    host = "host.docker.internal"
+    netloc = f"{host}:{parsed.port}" if parsed.port else host
+    if parsed.username:
+        auth = parsed.username
+        if parsed.password:
+            auth = f"{auth}:{parsed.password}"
+        netloc = f"{auth}@{netloc}"
+    return urlunparse(parsed._replace(netloc=netloc))
+
+
+def _supabase_api_url() -> str:
+    return _docker_host_url(
+        os.getenv("SUPABASE_API_URL") or "",
+        in_docker=os.path.exists("/.dockerenv"),
+    )
+
+
 appConfig = {
-    "supabase_api_url": os.getenv("SUPABASE_API_URL"),
+    "supabase_api_url": _supabase_api_url(),
     "supabase_secret_key": os.getenv("SUPABASE_SECRET_KEY"),
     "clerk_secret_key": os.getenv("CLERK_SECRET_KEY"),
     "domain": os.getenv("DOMAIN"),
