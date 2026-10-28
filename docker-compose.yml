@@ -28,7 +28,6 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       REDIS_URL: redis://redis:6379/0
-      SUPABASE_API_URL: http://host.docker.internal:54321
       WATCHFILES_FORCE_POLLING: "true"
     volumes:
       - ./src:/app/src
@@ -52,7 +51,6 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       REDIS_URL: redis://redis:6379/0
-      SUPABASE_API_URL: http://host.docker.internal:54321
       WATCHFILES_FORCE_POLLING: "true"
     volumes:
       - ./src:/app/src
