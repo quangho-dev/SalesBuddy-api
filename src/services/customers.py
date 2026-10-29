@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from io import BytesIO
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 import re
 import unicodedata
 
@@ -37,8 +38,17 @@ TEMPLATE_HEADERS = (
     "Tên công ty",
     "Điện thoại",
     "Người liên hệ",
+    "Địa chỉ",
     "Mã số thuế",
     "Hạn công nợ (ngày)",
+    "Lịch sử tương tác",
+)
+
+_LOCAL_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
+_INTERACTION_LINE = re.compile(
+    r"^(\d{1,2}[/-]\d{1,2}[/-]\d{4}|\d{4}-\d{1,2}-\d{1,2})"
+    r"(?:[ T](\d{1,2}:\d{2}))?"
+    r"\s*(.*)$"
 )
 
 HEADER_ALIASES = {
@@ -64,6 +74,11 @@ HEADER_ALIASES = {
         "contact person",
         "lien he",
     },
+    "address": {
+        "dia chi",
+        "address",
+        "dia chi cong ty",
+    },
     "tax_code": {
         "ma so thue",
         "mst",
@@ -78,6 +93,13 @@ HEADER_ALIASES = {
         "payment term",
         "credit days",
         "debt term",
+    },
+    "interaction_history": {
+        "lich su tuong tac",
+        "tuong tac",
+        "interaction",
+        "interaction history",
+        "history",
     },
 }
 
@@ -120,6 +142,8 @@ def _normalize_interactions(items: list | None) -> list[dict]:
         if created_at is None:
             created_at = _now()
         elif hasattr(created_at, "isoformat"):
+            if getattr(created_at, "tzinfo", None) is not None:
+                created_at = created_at.astimezone(timezone.utc)
             created_at = created_at.isoformat()
         else:
             created_at = str(created_at)
@@ -134,13 +158,22 @@ def _normalize_interactions(items: list | None) -> list[dict]:
     return _sort_interactions(normalized)
 
 
-def _interaction_time(item: dict) -> str:
-    return str(item.get("created_at") or "")
+def _interaction_timestamp(item: dict) -> float:
+    raw = item.get("created_at")
+    if raw is None or raw == "":
+        return float("-inf")
+    if hasattr(raw, "timestamp"):
+        return raw.timestamp()
+    text = str(raw).replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return float("-inf")
 
 
 def _sort_interactions(items: list | None) -> list[dict]:
     rows = [item for item in (items or []) if isinstance(item, dict)]
-    return sorted(rows, key=_interaction_time, reverse=True)
+    return sorted(rows, key=_interaction_timestamp, reverse=True)
 
 
 def _format_customer(row: dict) -> dict:
@@ -213,11 +246,65 @@ def _map_headers(headers: tuple) -> dict[int, str]:
     return mapping
 
 
+def _parse_local_datetime(date_text: str, time_text: str | None) -> datetime | None:
+    if "-" in date_text and date_text[0:4].isdigit():
+        year_text, month_text, day_text = date_text.split("-", 2)
+    else:
+        day_text, month_text, year_text = re.split(r"[/-]", date_text)
+    hour, minute = (0, 0)
+    if time_text:
+        hour_text, minute_text = time_text.split(":", 1)
+        hour, minute = int(hour_text), int(minute_text)
+    try:
+        return datetime(
+            int(year_text),
+            int(month_text),
+            int(day_text),
+            hour,
+            minute,
+            tzinfo=_LOCAL_TZ,
+        )
+    except ValueError:
+        return None
+
+
+def _split_interaction_line(line: str) -> tuple[datetime | None, str]:
+    match = _INTERACTION_LINE.match(line.strip())
+    if not match:
+        return None, line.strip()
+    date_text, time_text, rest = match.group(1), match.group(2), match.group(3).strip()
+    content = re.sub(r"^[|\-–—:]\s*", "", rest).strip()
+    if not content:
+        return None, line.strip()
+    created_at = _parse_local_datetime(date_text, time_text)
+    if created_at is None:
+        return None, line.strip()
+    return created_at, content
+
+
+def _parse_interaction_cell(value) -> list[dict]:
+    text = _cell_text(value)
+    items = []
+    for line in re.split(r"\r?\n+", text):
+        content_line = line.strip()
+        if not content_line:
+            continue
+        created_at, content = _split_interaction_line(content_line)
+        if not content:
+            continue
+        items.append({"content": content, "created_at": created_at})
+    return items
+
+
 def _row_payload(values: tuple, mapping: dict[int, str]) -> dict:
     payload = {field: "" for field in TEXT_FIELDS}
     payload["payment_term_days"] = None
+    payload["interaction_history"] = []
     for index, field in mapping.items():
         if index >= len(values):
+            continue
+        if field == "interaction_history":
+            payload["interaction_history"] = _parse_interaction_cell(values[index])
             continue
         text = _cell_text(values[index])
         if field == "payment_term_days" and text == "":
@@ -299,7 +386,7 @@ def import_customers_from_xlsx(clerk_id: str, content: bytes) -> dict:
         mapping = _map_headers(headers or ())
         if not mapping:
             raise CustomerImportError(
-                "Không nhận diện được cột. Hãy dùng file mẫu (Tên công ty, Điện thoại, Người liên hệ, Mã số thuế)."
+                "Không nhận diện được cột. Hãy dùng file mẫu (Tên công ty, Điện thoại, Người liên hệ, Địa chỉ, Mã số thuế, Lịch sử tương tác)."
             )
 
         payloads = []
