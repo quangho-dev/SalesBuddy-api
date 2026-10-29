@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from typing import Literal
 from uuid import UUID
 
@@ -36,6 +36,8 @@ class CreateOrderRequest(BaseModel):
     order_date: date | None = None
     notes: str = ""
     is_paid: bool = False
+    is_delivered: bool = False
+    delivered_at: datetime | None = None
     payment_method: PaymentMethod | None = None
     paid_amount: float = Field(default=0, ge=0)
     items: list[OrderItemInput] = Field(min_length=1)
@@ -46,6 +48,8 @@ class UpdateOrderRequest(BaseModel):
     order_date: date | None = None
     notes: str | None = None
     is_paid: bool | None = None
+    is_delivered: bool | None = None
+    delivered_at: datetime | None = None
     payment_method: PaymentMethod | None = None
     paid_amount: float | None = Field(default=None, ge=0)
     items: list[OrderItemInput] | None = None

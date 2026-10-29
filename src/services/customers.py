@@ -501,15 +501,19 @@ def update_customer(customer_id: str, clerk_id: str, payload: dict) -> dict:
 
 def delete_customer(customer_id: str, clerk_id: str) -> dict:
     existing = get_customer(customer_id, clerk_id)
-    # Orders and quotes reference this customer with ON DELETE RESTRICT.
-    # Remove the owner's related rows first. Payments and line items cascade.
-    (
+    # Orders and quotes reference this customer. Remove them first so stock
+    # reserved by a delivered order is returned before the order disappears.
+    from src.services.orders import delete_order
+
+    order_rows = (
         supabase.table("orders")
-        .delete()
+        .select("id")
         .eq("customer_id", customer_id)
         .eq("clerk_id", clerk_id)
         .execute()
     )
+    for row in order_rows.data or []:
+        delete_order(row["id"], clerk_id)
     (
         supabase.table("quotes")
         .delete()

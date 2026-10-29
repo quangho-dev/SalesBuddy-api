@@ -1,4 +1,5 @@
 from datetime import date, datetime, timezone
+import re
 
 from src.services.customers import CustomerNotFoundError, get_customer
 from src.services.supabase import supabase
@@ -75,6 +76,24 @@ def _bool(value) -> bool:
     return bool(value)
 
 
+def _timestamp(value) -> str | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ValueError("Thời gian giao hàng không hợp lệ.") from error
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
 def _date(value) -> str:
     if value is None or value == "":
         return date.today().isoformat()
@@ -131,6 +150,8 @@ def _to_order_row(payload: dict, clerk_id: str) -> dict:
         "order_date": _date(payload.get("order_date")),
         "notes": _text(payload.get("notes")),
         "is_paid": _bool(payload.get("is_paid")),
+        "is_delivered": _bool(payload.get("is_delivered")),
+        "delivered_at": _timestamp(payload.get("delivered_at")),
         "payment_method": _payment_method(payload.get("payment_method")),
         "paid_amount": _paid_amount(payload.get("paid_amount")),
     }
@@ -147,6 +168,8 @@ def _format_order(row: dict) -> dict:
         {field: item.get(field) for field in ITEM_FIELDS} for item in items
     ]
     row["is_paid"] = _bool(row.get("is_paid"))
+    row["is_delivered"] = _bool(row.get("is_delivered"))
+    row["delivered_at"] = _timestamp(row.get("delivered_at"))
     row["payment_method"] = _payment_method(row.get("payment_method"))
     row["paid_amount"] = _paid_amount(row.get("paid_amount"))
     return row
@@ -203,6 +226,97 @@ def _delete_order_payments(order_id: str) -> None:
     supabase.table("payments").delete().eq("order_id", order_id).execute()
 
 
+def _name_key(value) -> str:
+    return re.sub(r"\s+", " ", _text(value)).casefold()
+
+
+def _products_for_owner(clerk_id: str) -> list[dict]:
+    result = (
+        supabase.table("products")
+        .select("id, name, unit, stock, created_at")
+        .eq("clerk_id", clerk_id)
+        .order("created_at")
+        .execute()
+    )
+    return result.data or []
+
+
+def _match_product(products: list[dict], item: dict) -> dict | None:
+    name = _name_key(item.get("product_name"))
+    if not name:
+        return None
+    named = [row for row in products if _name_key(row.get("name")) == name]
+    if not named:
+        return None
+    unit = _name_key(item.get("unit"))
+    if unit:
+        same_unit = [row for row in named if _name_key(row.get("unit")) == unit]
+        if same_unit:
+            return same_unit[0]
+    return named[0]
+
+
+def _quantities_by_product(products: list[dict], items: list[dict]) -> dict[str, float]:
+    totals: dict[str, float] = {}
+    for item in items or []:
+        product = _match_product(products, item)
+        if not product:
+            continue
+        quantity = _number(item.get("quantity"))
+        if quantity == 0:
+            continue
+        product_id = product["id"]
+        totals[product_id] = totals.get(product_id, 0.0) + quantity
+    return totals
+
+
+def _sync_delivery_stock(
+    clerk_id: str,
+    before_items: list[dict],
+    after_items: list[dict],
+) -> None:
+    """Subtract stock for quantities that are delivered now and were not before.
+
+    before_items are lines already deducted. after_items are lines that should
+    stay deducted. A smaller after list puts stock back.
+    """
+    products = _products_for_owner(clerk_id)
+    before = _quantities_by_product(products, before_items)
+    after = _quantities_by_product(products, after_items)
+    changes = {
+        product_id: after.get(product_id, 0.0) - before.get(product_id, 0.0)
+        for product_id in set(before) | set(after)
+    }
+    changes = {product_id: qty for product_id, qty in changes.items() if qty}
+    if not changes:
+        return
+
+    by_id = {row["id"]: row for row in products}
+    applied: list[tuple[str, float]] = []
+    try:
+        for product_id, quantity in changes.items():
+            product = by_id.get(product_id)
+            if not product:
+                continue
+            new_stock = _number(product.get("stock")) - quantity
+            result = (
+                supabase.table("products")
+                .update({"stock": new_stock, "updated_at": _now()})
+                .eq("id", product_id)
+                .eq("clerk_id", clerk_id)
+                .execute()
+            )
+            if not result.data:
+                raise RuntimeError("Failed to update product stock")
+            applied.append((product_id, _number(product.get("stock"))))
+    except Exception:
+        for product_id, previous_stock in applied:
+            supabase.table("products").update(
+                {"stock": previous_stock, "updated_at": _now()}
+            ).eq("id", product_id).eq("clerk_id", clerk_id).execute()
+        raise
+
+
 def _replace_items(order_id: str, items: list[dict]) -> None:
     supabase.table(ITEMS_TABLE).delete().eq("order_id", order_id).execute()
     rows = [{**item, "order_id": order_id} for item in items]
@@ -233,6 +347,8 @@ def create_order(clerk_id: str, payload: dict) -> dict:
         _replace_items(order_id, items)
         if payment:
             _insert_payment(clerk_id, order_id, payment)
+        if _bool(payload.get("is_delivered")):
+            _sync_delivery_stock(clerk_id, [], items)
     except Exception:
         supabase.table("payments").delete().eq("order_id", order_id).execute()
         supabase.table(TABLE).delete().eq("id", order_id).eq(
@@ -285,6 +401,10 @@ def update_order(order_id: str, clerk_id: str, payload: dict) -> dict:
         updates["notes"] = _text(payload["notes"])
     if "is_paid" in payload and payload["is_paid"] is not None:
         updates["is_paid"] = _bool(payload["is_paid"])
+    if "is_delivered" in payload and payload["is_delivered"] is not None:
+        updates["is_delivered"] = _bool(payload["is_delivered"])
+    if "delivered_at" in payload:
+        updates["delivered_at"] = _timestamp(payload.get("delivered_at"))
     if "payment_method" in payload:
         updates["payment_method"] = _payment_method(payload.get("payment_method"))
     if "paid_amount" in payload and payload["paid_amount"] is not None:
@@ -342,6 +462,26 @@ def update_order(order_id: str, clerk_id: str, payload: dict) -> dict:
             raise
     if clear_payments:
         _delete_order_payments(order_id)
+
+    was_delivered = bool(existing.get("is_delivered"))
+    will_delivered = (
+        updates["is_delivered"] if "is_delivered" in updates else was_delivered
+    )
+    previous_items = existing.get("items") or []
+    next_items = items if items is not None else previous_items
+    try:
+        _sync_delivery_stock(
+            clerk_id,
+            previous_items if was_delivered else [],
+            next_items if will_delivered else [],
+        )
+    except Exception:
+        supabase.table(TABLE).update(
+            {"is_delivered": was_delivered, "updated_at": _now()}
+        ).eq("id", order_id).eq("clerk_id", clerk_id).execute()
+        if items is not None and previous_items:
+            _replace_items(order_id, _normalize_items(previous_items))
+        raise
     return get_order(order_id, clerk_id)
 
 
@@ -374,5 +514,14 @@ def save_order_drive_file(
 
 def delete_order(order_id: str, clerk_id: str) -> dict:
     existing = get_order(order_id, clerk_id)
-    supabase.table(TABLE).delete().eq("id", order_id).eq("clerk_id", clerk_id).execute()
+    if existing.get("is_delivered"):
+        _sync_delivery_stock(clerk_id, existing.get("items") or [], [])
+    try:
+        supabase.table(TABLE).delete().eq("id", order_id).eq(
+            "clerk_id", clerk_id
+        ).execute()
+    except Exception:
+        if existing.get("is_delivered"):
+            _sync_delivery_stock(clerk_id, [], existing.get("items") or [])
+        raise
     return existing
