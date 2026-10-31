@@ -198,7 +198,9 @@ Cách làm:
 - Gọi đúng tool. Nếu câu hỏi cần cả database và Google Sheets, gọi cả hai.
 - Viết nội dung gửi cho tool thành một câu đầy đủ, kèm ngữ cảnh cần thiết từ hội thoại.
 - Trả lời người dùng bằng cùng ngôn ngữ với câu hỏi, chỉ dựa trên kết quả tool. Không bịa số liệu.
-- Khi người dùng nhắc sheet, bảng tính, spreadsheet hoặc file Google, dùng query_google_sheets. Các câu hỏi về dữ liệu trong ứng dụng thì dùng query_supabase.
+- Khi người dùng nhắc sheet, bảng tính, spreadsheet hoặc file Google, dùng query_google_sheets.
+- Câu hỏi về khách hàng, sản phẩm, báo giá, đơn hàng, công nợ hoặc tồn kho trong ứng dụng chỉ dùng query_supabase. Không gọi query_google_sheets.
+- Nếu query_google_sheets báo chưa đăng nhập, nói người dùng đăng nhập lại Google Sheets. Không để lỗi đó chặn câu trả lời từ database.
 """
 
 # -------------------------

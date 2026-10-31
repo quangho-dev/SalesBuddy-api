@@ -14,6 +14,7 @@ from src.scripts.prompts import (
     sales_database_prompt,
 )
 from src.scripts.utils import load_mcp_config
+from src.services.googleSheetsAuth import sheets_connection_status
 
 checkpointer = InMemorySaver()
 model = ChatOpenAI(
@@ -205,6 +206,11 @@ async def create_supervisor_tools(clerk_id: str):
         Args:
             query: Câu hỏi đầy đủ cần tra trong Google Sheets.
         """
+        if not sheets_connection_status().get("connected"):
+            return (
+                "Google Sheets chưa đăng nhập hoặc token đã hết hạn. "
+                "Hãy đăng nhập lại Google Sheets trên trang Trợ lý Sales."
+            )
         try:
             sheets_agent = create_agent(
                 model=model,
@@ -218,7 +224,9 @@ async def create_supervisor_tools(clerk_id: str):
                 {"messages": [HumanMessage(query)]},
             )
             return _message_text(result["messages"][-1])
-        except Exception as exc:
+        except BaseException as exc:
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
             return f"Không tra được Google Sheets: {_error_text(exc)}"
 
     return [query_supabase, query_google_sheets]
