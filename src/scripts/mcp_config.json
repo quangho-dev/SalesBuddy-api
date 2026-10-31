@@ -16,5 +16,9 @@
       "TOKEN_PATH": "/Users/admin/.gmail-mcp/token.json"
     },
     "transport": "stdio"
+  },
+  "supabase": {
+    "transport": "http",
+    "url": "https://mcp.supabase.com/mcp?project_ref=mhhwvbvhavkgwtmmbqda&features=docs%2Caccount%2Cdatabase%2Cdebugging%2Cdevelopment%2Cfunctions%2Cbranching"
   }
 }

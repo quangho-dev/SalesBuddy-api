@@ -1,5 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+from src.config.index import appConfig
 from src.routes.userRoutes import router as userRoutes
 from src.routes.targetCustomersRoutes import router as targetCustomersRoutes
 from src.routes.productsRoutes import router as productsRoutes
@@ -9,6 +11,8 @@ from src.routes.orderRoutes import router as orderRoutes
 from src.routes.quoteRoutes import router as quoteRoutes
 from src.routes.paymentRoutes import router as paymentRoutes
 from src.routes.settingsRoutes import router as settingsRoutes
+from src.routes.googleSheetsRoutes import router as googleSheetsRoutes
+from src.services.googleSheetsAuth import finish_sheets_login
 
 # Create FastAPI app
 app = FastAPI(
@@ -34,6 +38,24 @@ app.include_router(orderRoutes, prefix="/api/orders")
 app.include_router(quoteRoutes, prefix="/api/quotes")
 app.include_router(paymentRoutes, prefix="/api/payments")
 app.include_router(settingsRoutes, prefix="/api/settings")
+app.include_router(googleSheetsRoutes, prefix="/api/google/sheets")
+
+
+@app.get("/")
+async def google_sheets_oauth_callback(
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+):
+    if code or state or error:
+        try:
+            target = finish_sheets_login(code, state, error)
+        except Exception:
+            domain = (appConfig["domain"] or "http://localhost:3000").rstrip("/")
+            target = f"{domain}/chat?google=error"
+        return RedirectResponse(target, status_code=302)
+    return {"status": "ok", "service": "Sales Buddy API"}
+
 
 @app.get("/health")
 async def health_check():
