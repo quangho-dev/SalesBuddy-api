@@ -1,4 +1,5 @@
 import os
+import uuid
 from collections.abc import AsyncIterator
 
 from langchain.agents import create_agent
@@ -14,6 +15,12 @@ from src.scripts.prompts import (
     sales_database_prompt,
 )
 from src.scripts.utils import load_mcp_config
+from src.services.chatHistory import (
+    discard_chat_thread,
+    list_chat_messages,
+    open_chat_thread,
+    save_chat_exchange,
+)
 from src.services.googleSheetsAuth import sheets_connection_status
 
 checkpointer = InMemorySaver()
@@ -29,35 +36,6 @@ def _error_text(exc: BaseException) -> str:
     if exceptions:
         return "; ".join(_error_text(item) for item in exceptions)
     return str(exc)
-
-
-def _repair_dangling_tool_calls(messages) -> list[ToolMessage]:
-    """Add outputs for tool calls that were saved before the tool failed.
-
-    The Responses API rejects the next turn when a function call has no output.
-    """
-    answered = {
-        message.tool_call_id
-        for message in messages
-        if isinstance(message, ToolMessage) and message.tool_call_id
-    }
-    repairs = []
-    for message in messages:
-        if not isinstance(message, AIMessage):
-            continue
-        for call in message.tool_calls or []:
-            call_id = call.get("id")
-            if not call_id or call_id in answered:
-                continue
-            repairs.append(
-                ToolMessage(
-                    content="Tool failed before it could return a result.",
-                    tool_call_id=call_id,
-                    status="error",
-                )
-            )
-            answered.add(call_id)
-    return repairs
 
 
 _TOOL_STATUS = {
@@ -247,13 +225,27 @@ async def create_chat_supervisor(clerk_id: str):
     })
 
 
-async def _prepare_supervisor(clerk_id: str, thread_id: str):
+def _history_messages(clerk_id: str, conversation_id: str, query: str) -> list:
+    """Replay this conversation, then the new question.
+
+    Each turn uses a new checkpoint so this history is not appended twice.
+    """
+    messages = []
+    for row in list_chat_messages(clerk_id, conversation_id, limit=40):
+        content = (row.get("content") or "").strip()
+        if not content:
+            continue
+        if row.get("role") == "assistant":
+            messages.append(AIMessage(content))
+        else:
+            messages.append(HumanMessage(content))
+    messages.append(HumanMessage(query))
+    return messages
+
+
+async def _prepare_supervisor(clerk_id: str):
     supervisor = await create_chat_supervisor(clerk_id)
-    config = {"configurable": {"thread_id": thread_id}}
-    state = await supervisor.aget_state(config)
-    repairs = _repair_dangling_tool_calls(state.values.get("messages") or [])
-    if repairs:
-        await supervisor.aupdate_state(config, {"messages": repairs}, as_node="tools")
+    config = {"configurable": {"thread_id": f"{clerk_id}:{uuid.uuid4()}"}}
     return supervisor, config
 
 
@@ -262,12 +254,45 @@ async def stream_chat_supervisor(
     clerk_id: str,
     thread_id: str,
 ) -> AsyncIterator[dict]:
-    """Yield status updates, then token deltas for the supervisor's own answer."""
+    """Yield the conversation id, status updates, then the supervisor's answer."""
+    conversation_id = thread_id.strip()
+    thread, created = open_chat_thread(clerk_id, conversation_id or None, query)
+    yield {
+        "type": "thread",
+        "id": thread["id"],
+        "title": thread["title"],
+        "updated_at": thread["updated_at"],
+    }
     yield {"type": "status", "text": "Đang xử lý..."}
-    supervisor, config = await _prepare_supervisor(clerk_id, thread_id)
+    supervisor, config = await _prepare_supervisor(clerk_id)
+    prior_messages = _history_messages(clerk_id, thread["id"], query)
+    parts: list[str] = []
+    try:
+        async for event in _stream_supervisor_turn(supervisor, config, prior_messages):
+            if event.get("type") == "delta" and event.get("text"):
+                parts.append(event["text"])
+            yield event
+    except Exception:
+        if created:
+            discard_chat_thread(clerk_id, thread["id"])
+        raise
+    reply = "".join(parts).strip()
+    if reply:
+        saved = save_chat_exchange(clerk_id, thread["id"], query, reply)
+        yield {
+            "type": "thread",
+            "id": saved["id"],
+            "title": saved["title"],
+            "updated_at": saved["updated_at"],
+        }
+    elif created:
+        discard_chat_thread(clerk_id, thread["id"])
+
+
+async def _stream_supervisor_turn(supervisor, config, prior_messages):
     announced: set[str] = set()
     async for mode, data in supervisor.astream(
-        {"messages": [HumanMessage(query)]},
+        {"messages": prior_messages},
         config=config,
         stream_mode=["messages", "updates"],
     ):

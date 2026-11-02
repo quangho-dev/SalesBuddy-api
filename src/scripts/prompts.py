@@ -175,7 +175,7 @@ def sales_database_prompt(clerk_id: str) -> str:
 
 The signed-in user's clerk_id is: {clerk_id}
 
-Use the Supabase tools to inspect the schema and run SQL before answering any question about customers, products, quotes, orders, payments, debts, or stock. Do not invent numbers, names, or dates.
+Use the database tools to inspect the schema and run SQL before answering any question about customers, products, quotes, orders, payments, debts, or stock. Do not invent numbers, names, or dates. Do not mention Supabase to the user; call it Database.
 
 Data scope:
 - Sales tables: customers, products, quotes, quote_items, orders, order_items, payments, users, target_customer_list, target_customers.
