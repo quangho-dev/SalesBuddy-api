@@ -95,7 +95,7 @@ def list_chat_messages(clerk_id: str, thread_id: str, limit: int = HISTORY_LIMIT
         raise LookupError("Chat thread not found.")
     result = (
         supabase.table(MESSAGES)
-        .select("id, role, content, created_at")
+        .select("id, role, content, citations, created_at")
         .eq("thread_id", thread_id)
         .order("created_at", desc=True)
         .limit(limit)
@@ -106,7 +106,30 @@ def list_chat_messages(clerk_id: str, thread_id: str, limit: int = HISTORY_LIMIT
     return rows
 
 
-def save_chat_exchange(clerk_id: str, thread_id: str, question: str, answer: str) -> dict:
+def _stored_citations(citations: list | None) -> list[dict]:
+    items = []
+    for item in citations or []:
+        if not isinstance(item, dict):
+            continue
+        excerpt = str(item.get("excerpt") or "").strip()
+        filename = str(item.get("filename") or "").strip()
+        if not excerpt or not filename:
+            continue
+        stored = {"filename": filename, "excerpt": excerpt}
+        page = item.get("page")
+        if page not in (None, "", "Unknown"):
+            stored["page"] = page
+        items.append(stored)
+    return items
+
+
+def save_chat_exchange(
+    clerk_id: str,
+    thread_id: str,
+    question: str,
+    answer: str,
+    citations: list | None = None,
+) -> dict:
     question = question.strip()
     answer = answer.strip()
     thread = get_chat_thread(clerk_id, thread_id)
@@ -122,6 +145,7 @@ def save_chat_exchange(clerk_id: str, thread_id: str, question: str, answer: str
                 "thread_id": thread["id"],
                 "role": "user",
                 "content": question,
+                "citations": [],
                 "created_at": asked_at.isoformat(),
             },
             {
@@ -129,6 +153,7 @@ def save_chat_exchange(clerk_id: str, thread_id: str, question: str, answer: str
                 "thread_id": thread["id"],
                 "role": "assistant",
                 "content": answer,
+                "citations": _stored_citations(citations),
                 "created_at": (asked_at + timedelta(milliseconds=1)).isoformat(),
             },
         ]

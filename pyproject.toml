@@ -33,7 +33,13 @@ dependencies = [
     "python-pptx>=1.0.2",
     "scrapingbee>=2.1.1",
     "supabase>=2.31.0",
+    "pi-heif>=1.2.0,<2",
+    "pikepdf>=10.3.0,<11",
     "unstructured>=0.27.5",
+    "torch>=2.10",
+    "torchvision>=0.26",
+    "unstructured-inference>=1.6.12,<2",
+    "unstructured-pytesseract>=0.3.15,<1",
     "uvicorn>=0.52.4",
     "watchfiles>=1.2.0",
 ]
@@ -45,3 +51,18 @@ constraint-dependencies = [
     "numba>=0.61.0,<0.62",
     "llvmlite>=0.44.0,<0.45",
 ]
+
+# Linux images have no GPU. Pin those wheels to the CPU index so a
+# rebuild does not download the CUDA build of torch.
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu" },
+]
+torchvision = [
+    { index = "pytorch-cpu" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

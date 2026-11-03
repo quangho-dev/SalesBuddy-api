@@ -9,9 +9,12 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
 
+from src.rag.retrieval.index import retrieve_context
+from src.rag.retrieval.utils import get_ready_documents, public_document_excerpts
 from src.scripts.prompts import (
     GOOGLE_SHEETS_PROMPT,
     chat_supervisor_prompt,
+    document_assistant_prompt,
     sales_database_prompt,
 )
 from src.scripts.utils import load_mcp_config
@@ -40,13 +43,15 @@ def _error_text(exc: BaseException) -> str:
 
 _TOOL_STATUS = {
     "query_supabase": "Đang tra cứu database...",
+    "query_documents": "Đang đọc tài liệu...",
+    "search_uploaded_documents": "Đang đọc tài liệu...",
     "query_google_sheets": "Đang tra cứu Google Sheets...",
 }
 
 
 def _is_supervisor_turn(metadata: dict | None) -> bool:
     tags = (metadata or {}).get("tags") or []
-    if "supabase" in tags or "google-sheets" in tags:
+    if "supabase" in tags or "google-sheets" in tags or "documents" in tags:
         return False
     if "supervisor" in tags:
         return True
@@ -148,10 +153,34 @@ async def _google_sheet_tools():
     return [tool for tool in tools if tool.name not in hidden]
 
 
-async def create_supervisor_tools(clerk_id: str):
-    """Wrap the Supabase and Google Sheets agents as tools for the supervisor.
+def _format_document_context(texts: list, tables: list, citations: list) -> str:
+    if not texts and not tables:
+        return "Không tìm thấy nội dung liên quan trong tài liệu đã tải."
+    blocks = []
+    for index, text in enumerate(texts, 1):
+        blocks.append(f"Đoạn {index}\n{text.strip()}")
+    for index, table in enumerate(tables, 1):
+        blocks.append(f"Bảng {index}\n{table}")
+    sources = []
+    for citation in citations:
+        filename = citation.get("filename") or "Tài liệu"
+        page = citation.get("page")
+        page_label = f", trang {page}" if page not in (None, "", "Unknown") else ""
+        sources.append(f"- {filename}{page_label}")
+    if sources:
+        blocks.append("Nguồn:\n" + "\n".join(sources))
+    return "\n\n".join(blocks)
 
-    Each specialist connects to its MCP server only when the supervisor calls it.
+
+async def create_supervisor_tools(
+    clerk_id: str,
+    document_ids: list[str] | None = None,
+    excerpts_out: list | None = None,
+):
+    """Wrap the database, document, and Google Sheets agents as supervisor tools.
+
+    Each specialist connects to its own tools only when the supervisor calls it.
+    document_ids limits document search to the files the user selected.
     """
 
     @tool
@@ -176,6 +205,66 @@ async def create_supervisor_tools(clerk_id: str):
             return _message_text(result["messages"][-1])
         except Exception as exc:
             return f"Không tra được database: {_error_text(exc)}"
+
+    @tool
+    def search_uploaded_documents(query: str) -> str:
+        """Tìm các đoạn liên quan trong tài liệu đã tải của người dùng.
+
+        Args:
+            query: Câu hỏi hoặc cụm từ cần tìm trong tài liệu.
+        """
+        try:
+            if document_ids is None:
+                ready = get_ready_documents(clerk_id)
+            else:
+                ready = get_ready_documents(clerk_id, document_ids)
+            if not ready:
+                if document_ids is None:
+                    return "Chưa có tài liệu nào đã embed xong. Hãy tải tài liệu ở trang Tài liệu."
+                return "Các tài liệu đã chọn chưa sẵn sàng hoặc không còn."
+            selected_names = [row["filename"] for row in ready]
+            texts, _images, tables, citations = retrieve_context(
+                clerk_id,
+                query,
+                document_ids=None if document_ids is None else [row["id"] for row in ready],
+            )
+            found = public_document_excerpts(citations)
+            if excerpts_out is not None and found:
+                excerpts_out.clear()
+                excerpts_out.extend(found)
+            context = _format_document_context(texts, tables, citations)
+            if document_ids is None:
+                return context
+            return "Chỉ tìm trong: " + ", ".join(selected_names) + "\n\n" + context
+        except Exception as exc:
+            return f"Không đọc được tài liệu: {_error_text(exc)}"
+
+    @tool
+    async def query_documents(query: str) -> str:
+        """Trả lời câu hỏi về tài liệu đã tải: PDF, Word, PowerPoint, TXT, Markdown, bảng giá, catalogue, hợp đồng.
+
+        Args:
+            query: Câu hỏi đầy đủ cần tìm trong tài liệu đã tải.
+        """
+        try:
+            document_agent = create_agent(
+                model=model,
+                tools=[search_uploaded_documents],
+                system_prompt=document_assistant_prompt(
+                    None
+                    if document_ids is None
+                    else [row["filename"] for row in get_ready_documents(clerk_id, document_ids)]
+                ),
+            ).with_config({
+                "run_name": "chat_document_agent",
+                "tags": ["chat", "documents"],
+            })
+            result = await document_agent.ainvoke(
+                {"messages": [HumanMessage(query)]},
+            )
+            return _message_text(result["messages"][-1])
+        except Exception as exc:
+            return f"Không đọc được tài liệu: {_error_text(exc)}"
 
     @tool
     async def query_google_sheets(query: str) -> str:
@@ -207,16 +296,25 @@ async def create_supervisor_tools(clerk_id: str):
                 raise
             return f"Không tra được Google Sheets: {_error_text(exc)}"
 
-    return [query_supabase, query_google_sheets]
+    return [query_supabase, query_documents, query_google_sheets]
 
 
-async def create_chat_supervisor(clerk_id: str):
-    """Supervisor that delegates database and spreadsheet questions."""
-    supervisor_tools = await create_supervisor_tools(clerk_id)
+async def create_chat_supervisor(
+    clerk_id: str,
+    document_ids: list[str] | None = None,
+    excerpts_out: list | None = None,
+):
+    """Supervisor that delegates database, document, and spreadsheet questions."""
+    selected_names = None
+    if document_ids is not None:
+        selected_names = [
+            row["filename"] for row in get_ready_documents(clerk_id, document_ids)
+        ]
+    supervisor_tools = await create_supervisor_tools(clerk_id, document_ids, excerpts_out)
     return create_agent(
         model=model,
         tools=supervisor_tools,
-        system_prompt=chat_supervisor_prompt(),
+        system_prompt=chat_supervisor_prompt(selected_names),
         checkpointer=checkpointer,
     ).with_config({
         "recursion_limit": 12,
@@ -243,8 +341,12 @@ def _history_messages(clerk_id: str, conversation_id: str, query: str) -> list:
     return messages
 
 
-async def _prepare_supervisor(clerk_id: str):
-    supervisor = await create_chat_supervisor(clerk_id)
+async def _prepare_supervisor(
+    clerk_id: str,
+    document_ids: list[str] | None = None,
+    excerpts_out: list | None = None,
+):
+    supervisor = await create_chat_supervisor(clerk_id, document_ids, excerpts_out)
     config = {"configurable": {"thread_id": f"{clerk_id}:{uuid.uuid4()}"}}
     return supervisor, config
 
@@ -253,6 +355,7 @@ async def stream_chat_supervisor(
     query: str,
     clerk_id: str,
     thread_id: str,
+    document_ids: list[str] | None = None,
 ) -> AsyncIterator[dict]:
     """Yield the conversation id, status updates, then the supervisor's answer."""
     conversation_id = thread_id.strip()
@@ -264,7 +367,8 @@ async def stream_chat_supervisor(
         "updated_at": thread["updated_at"],
     }
     yield {"type": "status", "text": "Đang xử lý..."}
-    supervisor, config = await _prepare_supervisor(clerk_id)
+    excerpts: list[dict] = []
+    supervisor, config = await _prepare_supervisor(clerk_id, document_ids, excerpts)
     prior_messages = _history_messages(clerk_id, thread["id"], query)
     parts: list[str] = []
     try:
@@ -277,8 +381,10 @@ async def stream_chat_supervisor(
             discard_chat_thread(clerk_id, thread["id"])
         raise
     reply = "".join(parts).strip()
+    if reply and excerpts:
+        yield {"type": "citations", "items": excerpts}
     if reply:
-        saved = save_chat_exchange(clerk_id, thread["id"], query, reply)
+        saved = save_chat_exchange(clerk_id, thread["id"], query, reply, excerpts)
         yield {
             "type": "thread",
             "id": saved["id"],
