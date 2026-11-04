@@ -1,4 +1,5 @@
 from uuid import UUID
+import asyncio
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import Response
@@ -85,7 +86,9 @@ async def import_products(
         raise HTTPException(status_code=400, detail="File Excel vượt quá 5MB")
 
     try:
-        return import_products_from_xlsx(user_clerk_id, content)
+        return await asyncio.to_thread(
+            import_products_from_xlsx, user_clerk_id, content
+        )
     except ProductImportError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

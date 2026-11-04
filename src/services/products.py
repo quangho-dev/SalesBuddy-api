@@ -267,6 +267,54 @@ def create_products(clerk_id: str, payloads: list[dict]) -> list[dict]:
     return saved
 
 
+def _plan_product_import(
+    parsed_rows: list[tuple[dict, dict]],
+    by_code: dict[str, str],
+) -> tuple[list[dict], dict[str, dict], int, int]:
+    new_by_code: dict[str, dict] = {}
+    new_without_code: list[dict] = []
+    updates_by_id: dict[str, dict] = {}
+    imported = 0
+    updated = 0
+    for payload, changes in parsed_rows:
+        code = _fold_code(payload.get("product_code"))
+        product_id = by_code.get(code) if code else None
+        if product_id:
+            updates_by_id.setdefault(product_id, {}).update(changes)
+            updated += 1
+            continue
+        if code and code in new_by_code:
+            new_by_code[code].update(changes)
+            updated += 1
+            continue
+        if code:
+            new_by_code[code] = dict(payload)
+        else:
+            new_without_code.append(dict(payload))
+        imported += 1
+    return [*new_by_code.values(), *new_without_code], updates_by_id, imported, updated
+
+
+def _apply_product_updates(product_id: str, clerk_id: str, changes: dict) -> None:
+    updates = {}
+    for field in TEXT_FIELDS:
+        if field in changes and field != "product_code":
+            updates[field] = _text(changes[field])
+    for field in NUMBER_FIELDS:
+        if field in changes:
+            updates[field] = _number(changes[field])
+    if not updates:
+        return
+    updates["updated_at"] = _now()
+    (
+        supabase.table(TABLE)
+        .update(updates)
+        .eq("id", product_id)
+        .eq("clerk_id", clerk_id)
+        .execute()
+    )
+
+
 def import_products_from_xlsx(clerk_id: str, content: bytes) -> dict:
     try:
         workbook = load_workbook(BytesIO(content), read_only=True, data_only=True)
@@ -287,18 +335,19 @@ def import_products_from_xlsx(clerk_id: str, content: bytes) -> dict:
                 "Không nhận diện được cột. Hãy dùng file mẫu (Mã sản phẩm, Tên sản phẩm, ...)."
             )
 
-        payloads = []
+        parsed_rows = []
         errors = []
         skipped = 0
-        updated = 0
-        latest: dict[str, dict] = {}
-        by_code = _load_product_codes(clerk_id)
-        ensure_user(clerk_id)
+        empty_streak = 0
         for row_number, values in enumerate(rows, start=2):
             values = values or ()
             if all(value is None or str(value).strip() == "" for value in values):
+                empty_streak += 1
                 skipped += 1
+                if empty_streak >= 100:
+                    break
                 continue
+            empty_streak = 0
             try:
                 payload = _row_payload(values, mapping)
                 changes = _import_updates(values, mapping)
@@ -308,36 +357,25 @@ def import_products_from_xlsx(clerk_id: str, content: bytes) -> dict:
             if _is_empty_payload(payload):
                 skipped += 1
                 continue
-            code = _fold_code(payload.get("product_code"))
-            product_id = by_code.get(code) if code else None
-            if product_id:
-                if changes:
-                    saved = update_product(product_id, clerk_id, changes)
-                    latest[product_id] = saved
-                    saved_code = _fold_code(saved.get("product_code"))
-                    if saved_code:
-                        by_code[saved_code] = product_id
-                updated += 1
-                continue
-            result = supabase.table(TABLE).insert(_to_row(payload, clerk_id)).execute()
-            if not result.data:
-                raise RuntimeError("Failed to create product")
-            created = result.data[0]
-            created_id = str(created["id"])
-            latest[created_id] = created
-            if code:
-                by_code[code] = created_id
-            payloads.append(payload)
+            parsed_rows.append((payload, changes))
     finally:
         workbook.close()
 
+    by_code = _load_product_codes(clerk_id)
+    new_payloads, updates_by_id, imported, updated = _plan_product_import(
+        parsed_rows, by_code
+    )
+    create_products(clerk_id, new_payloads)
+    for product_id, changes in updates_by_id.items():
+        _apply_product_updates(product_id, clerk_id, changes)
+
     return {
-        "imported": len(payloads),
+        "imported": imported,
         "updated": updated,
         "skipped": skipped,
         "duplicates": 0,
-        "errors": errors,
-        "products": list(latest.values()),
+        "errors": errors[:100],
+        "products": [],
     }
 
 
