@@ -325,8 +325,24 @@ def _replace_items(order_id: str, items: list[dict]) -> None:
         raise RuntimeError("Failed to save order items")
 
 
+def find_order_for_quote(quote_id: str, clerk_id: str) -> dict | None:
+    result = (
+        supabase.table(TABLE)
+        .select("id, quote_id")
+        .eq("quote_id", quote_id)
+        .eq("clerk_id", clerk_id)
+        .limit(1)
+        .execute()
+    )
+    rows = result.data or []
+    return rows[0] if rows else None
+
+
 def create_order(clerk_id: str, payload: dict) -> dict:
     ensure_user(clerk_id)
+    quote_id = str(payload.get("quote_id") or "").strip()
+    if quote_id and find_order_for_quote(quote_id, clerk_id):
+        raise ValueError("Báo giá này đã có một đơn hàng.")
     items = _normalize_items(payload.get("items"))
     payment = _payment_to_record(payload, items)
     if payment:

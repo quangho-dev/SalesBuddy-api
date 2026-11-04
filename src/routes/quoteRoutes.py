@@ -13,6 +13,7 @@ from src.services.quotes import (
     delete_quote,
     get_quote,
     list_quotes,
+    set_quote_status,
     update_quote,
 )
 
@@ -38,6 +39,11 @@ class UpdateQuoteRequest(BaseModel):
     customer_id: UUID | None = None
     notes: str | None = None
     items: list[QuoteItemInput] | None = None
+
+
+class QuoteStatusRequest(BaseModel):
+    status: str = Field(pattern=r"^(converted|failed|unset)$")
+    reason: str = Field(default="", max_length=1000)
 
 
 class QuoteFileCustomerInput(BaseModel):
@@ -119,6 +125,30 @@ async def convert_quote_into_order(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to convert quote to order: {str(e)}",
+        )
+
+
+@router.post("/{quote_id}/status")
+async def change_quote_status(
+    quote_id: UUID,
+    body: QuoteStatusRequest,
+    user_clerk_id: str = Depends(get_current_user_clerk_id),
+):
+    try:
+        return set_quote_status(
+            str(quote_id),
+            user_clerk_id,
+            body.status,
+            body.reason,
+        )
+    except QuoteNotFoundError:
+        raise HTTPException(status_code=404, detail="Quote not found")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update quote status: {str(e)}",
         )
 
 

@@ -1,14 +1,19 @@
 from datetime import datetime, timezone
 
 from src.services.customers import get_customer
-from src.services.orders import create_order
+from src.services.orders import create_order, find_order_for_quote, get_order
 from src.services.supabase import supabase
 from src.services.users import ensure_user
 
 TABLE = "quotes"
 ITEMS_TABLE = "quote_items"
+EVENTS_TABLE = "quote_status_events"
 CUSTOMER_EMBED = "id, company_name, contact_person, phone_number, address, tax_code, payment_term_days"
-SELECT_FIELDS = f"*, customers({CUSTOMER_EMBED}), quote_items(*)"
+EVENT_FIELDS = "id, previous_quote_status, quote_status, reason, order_id, created_at"
+SELECT_FIELDS = (
+    f"*, customers({CUSTOMER_EMBED}), quote_items(*), orders(id), "
+    f"quote_status_events({EVENT_FIELDS})"
+)
 ITEM_FIELDS = (
     "id",
     "product_name",
@@ -23,6 +28,9 @@ VAT_RATE = 0.1
 
 class QuoteNotFoundError(LookupError):
     pass
+
+
+QUOTE_STATUSES = {"converted", "failed", "unset"}
 
 
 def _now() -> str:
@@ -100,13 +108,59 @@ def _normalize_items(items) -> list[dict]:
     return normalized
 
 
+def _linked_order_id(row: dict) -> str | None:
+    orders = row.pop("orders", None) or []
+    if isinstance(orders, dict):
+        orders = [orders]
+    for order in orders:
+        order_id = str((order or {}).get("id") or "").strip()
+        if order_id:
+            return order_id
+    return None
+
+
 def _format_quote(row: dict) -> dict:
     items = row.pop("quote_items", None) or []
     items = sorted(items, key=lambda item: item.get("sort_order") or 0)
     row["items"] = [
         {field: item.get(field) for field in ITEM_FIELDS} for item in items
     ]
+    row["order_id"] = _linked_order_id(row)
+    events = row.pop("quote_status_events", None) or []
+    row["status_events"] = sorted(
+        events,
+        key=lambda event: event.get("created_at") or "",
+        reverse=True,
+    )
     return row
+
+
+def _stored_status(quote: dict) -> str:
+    status = _text(quote.get("status"))
+    if status in QUOTE_STATUSES:
+        return status
+    return "unset"
+
+
+def _record_status_event(
+    clerk_id: str,
+    quote: dict,
+    status: str,
+    reason: str,
+) -> None:
+    order_id = _text(quote.get("order_id")) or None
+    supabase.table(EVENTS_TABLE).insert(
+        {
+            "clerk_id": clerk_id,
+            "quote_id": quote.get("id"),
+            "order_id": order_id,
+            "previous_quote_status": _stored_status(quote),
+            "quote_status": status,
+            "previous_order_status": "",
+            "order_status": "",
+            "reason": reason[:1000],
+        }
+    ).execute()
 
 
 def _owned_query(quote_id: str, clerk_id: str):
@@ -245,18 +299,61 @@ def save_quote_drive_file(
     return get_quote(quote_id, clerk_id)
 
 
+def set_quote_status(
+    quote_id: str, clerk_id: str, status: str, reason: str = ""
+) -> dict:
+    if status not in QUOTE_STATUSES:
+        raise ValueError("Trạng thái báo giá không hợp lệ.")
+    quote = get_quote(quote_id, clerk_id)
+    previous = _stored_status(quote)
+    reason_text = _text(reason)[:1000] if status == "failed" else ""
+    previous_reason = (
+        _text(quote.get("conversion_error"))[:1000] if previous == "failed" else ""
+    )
+    updates = {
+        "status": status,
+        "converted_to_order": status == "converted",
+        "conversion_error": reason_text,
+        "updated_at": _now(),
+    }
+    result = (
+        supabase.table(TABLE)
+        .update(updates)
+        .eq("id", quote_id)
+        .eq("clerk_id", clerk_id)
+        .execute()
+    )
+    if not result.data:
+        raise QuoteNotFoundError("Quote not found")
+    if previous != status or previous_reason != reason_text:
+        _record_status_event(clerk_id, quote, status, reason_text)
+    return get_quote(quote_id, clerk_id)
+
+
 def convert_quote_to_order(quote_id: str, clerk_id: str) -> dict:
     quote = get_quote(quote_id, clerk_id)
-    return create_order(
-        clerk_id,
-        {
-            "customer_id": quote.get("customer_id"),
-            "notes": quote.get("notes") or "",
-            "items": quote.get("items") or [],
-            "is_paid": False,
-            "quote_id": quote_id,
-        },
-    )
+    existing = find_order_for_quote(quote_id, clerk_id)
+    if existing and existing.get("id"):
+        set_quote_status(quote_id, clerk_id, "converted")
+        return get_order(str(existing["id"]), clerk_id)
+    try:
+        order = create_order(
+            clerk_id,
+            {
+                "customer_id": quote.get("customer_id"),
+                "notes": quote.get("notes") or "",
+                "items": quote.get("items") or [],
+                "is_paid": False,
+                "quote_id": quote_id,
+            },
+        )
+    except QuoteNotFoundError:
+        raise
+    except Exception as exc:
+        set_quote_status(quote_id, clerk_id, "failed", str(exc))
+        raise
+    set_quote_status(quote_id, clerk_id, "converted")
+    return order
 
 
 def delete_quote(quote_id: str, clerk_id: str) -> dict:
