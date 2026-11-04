@@ -40,6 +40,9 @@ TEMPLATE_HEADERS = (
     "Người liên hệ",
     "Địa chỉ",
     "Mã số thuế",
+    "Website",
+    "Facebook",
+    "Zalo",
     "Hạn công nợ (ngày)",
     "Lịch sử tương tác",
 )
@@ -85,6 +88,19 @@ HEADER_ALIASES = {
         "tax code",
         "tax id",
         "vat",
+    },
+    "website": {
+        "website",
+        "web",
+        "trang web",
+    },
+    "facebook": {
+        "facebook",
+        "fb",
+        "fanpage",
+    },
+    "zalo": {
+        "zalo",
     },
     "payment_term_days": {
         "han cong no",
@@ -317,35 +333,112 @@ def _is_empty_payload(payload: dict) -> bool:
     return not any(_text(payload.get(field)) for field in TEXT_FIELDS)
 
 
-def _identity_key(company_name, tax_code) -> tuple[str, str] | None:
-    company = re.sub(r"\s+", " ", _text(company_name)).casefold()
-    tax = re.sub(r"[\s.\-]", "", _text(tax_code)).casefold()
-    if not company and not tax:
-        return None
-    return (company, tax)
+def _fold_company(value) -> str:
+    return re.sub(r"\s+", " ", _text(value)).casefold()
 
 
-def _existing_customer_keys(clerk_id: str) -> set[tuple[str, str]]:
-    keys: set[tuple[str, str]] = set()
+def _fold_tax(value) -> str:
+    return re.sub(r"[\s.\-]", "", _text(value)).casefold()
+
+
+def _interaction_key(item: dict) -> tuple[str, int | None]:
+    content = _text(item.get("content")).casefold()
+    created_at = item.get("created_at")
+    if created_at is None or created_at == "":
+        return content, None
+    if hasattr(created_at, "timestamp"):
+        return content, int(created_at.timestamp() // 60)
+    stamp = _interaction_timestamp(item)
+    if stamp == float("-inf"):
+        return content, None
+    return content, int(stamp // 60)
+
+
+def _merge_interactions(existing: list | None, incoming: list | None) -> list[dict]:
+    merged = [item for item in (existing or []) if isinstance(item, dict)]
+    seen = {_interaction_key(item) for item in merged}
+    for item in incoming or []:
+        if not isinstance(item, dict):
+            continue
+        key = _interaction_key(item)
+        if not key[0] or key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    return merged
+
+
+def _import_updates(payload: dict, mapped_fields: set[str]) -> dict:
+    updates = {}
+    for field in TEXT_FIELDS:
+        if field not in mapped_fields:
+            continue
+        text = _text(payload.get(field))
+        if text:
+            updates[field] = text
+    if (
+        "payment_term_days" in mapped_fields
+        and payload.get("payment_term_days") not in (None, "")
+    ):
+        updates["payment_term_days"] = _nonneg_int(payload.get("payment_term_days"))
+    if "interaction_history" in mapped_fields and payload.get("interaction_history"):
+        updates["interaction_history"] = payload["interaction_history"]
+    return updates
+
+
+def _load_import_index(clerk_id: str) -> tuple[dict[str, str], dict[str, str], dict[str, list]]:
+    by_name: dict[str, str] = {}
+    by_tax: dict[str, str] = {}
+    histories: dict[str, list] = {}
     page_size = 1000
     start = 0
     while True:
         result = (
             supabase.table(TABLE)
-            .select("company_name, tax_code")
+            .select("id, company_name, tax_code, interaction_history")
             .eq("clerk_id", clerk_id)
+            .order("created_at")
             .range(start, start + page_size - 1)
             .execute()
         )
         rows = result.data or []
         for row in rows:
-            key = _identity_key(row.get("company_name"), row.get("tax_code"))
-            if key:
-                keys.add(key)
+            customer_id = str(row["id"])
+            histories[customer_id] = row.get("interaction_history") or []
+            name = _fold_company(row.get("company_name"))
+            tax = _fold_tax(row.get("tax_code"))
+            if name and name not in by_name:
+                by_name[name] = customer_id
+            if tax and tax not in by_tax:
+                by_tax[tax] = customer_id
         if len(rows) < page_size:
             break
         start += page_size
-    return keys
+    return by_name, by_tax, histories
+
+
+def _match_import_customer(
+    payload: dict, by_name: dict[str, str], by_tax: dict[str, str]
+) -> str | None:
+    tax = _fold_tax(payload.get("tax_code"))
+    name = _fold_company(payload.get("company_name"))
+    if tax and tax in by_tax:
+        return by_tax[tax]
+    if name and name in by_name:
+        return by_name[name]
+    return None
+
+
+def _remember_import_customer(
+    customer: dict, by_name: dict[str, str], by_tax: dict[str, str]
+) -> None:
+    customer_id = str(customer["id"])
+    name = _fold_company(customer.get("company_name"))
+    tax = _fold_tax(customer.get("tax_code"))
+    if name:
+        by_name[name] = customer_id
+    if tax:
+        by_tax[tax] = customer_id
 
 
 def create_customers(clerk_id: str, payloads: list[dict]) -> list[dict]:
@@ -386,13 +479,17 @@ def import_customers_from_xlsx(clerk_id: str, content: bytes) -> dict:
         mapping = _map_headers(headers or ())
         if not mapping:
             raise CustomerImportError(
-                "Không nhận diện được cột. Hãy dùng file mẫu (Tên công ty, Điện thoại, Người liên hệ, Địa chỉ, Mã số thuế, Lịch sử tương tác)."
+                "Không nhận diện được cột. Hãy dùng file mẫu (Tên công ty, Điện thoại, Người liên hệ, Địa chỉ, Mã số thuế, Website, Facebook, Zalo, Lịch sử tương tác)."
             )
 
-        payloads = []
+        mapped_fields = set(mapping.values())
         skipped = 0
-        duplicates = 0
-        seen = _existing_customer_keys(clerk_id)
+        imported = 0
+        updated = 0
+        latest: dict[str, dict] = {}
+        by_name, by_tax, histories = _load_import_index(clerk_id)
+        ensure_user(clerk_id)
+        default_days = get_settings(clerk_id)["default_payment_term_days"]
         for values in rows:
             values = values or ()
             if all(value is None or str(value).strip() == "" for value in values):
@@ -402,22 +499,50 @@ def import_customers_from_xlsx(clerk_id: str, content: bytes) -> dict:
             if _is_empty_payload(payload):
                 skipped += 1
                 continue
-            key = _identity_key(payload.get("company_name"), payload.get("tax_code"))
-            if key and key in seen:
-                duplicates += 1
+            customer_id = _match_import_customer(payload, by_name, by_tax)
+            if customer_id:
+                changes = _import_updates(payload, mapped_fields)
+                if "interaction_history" in changes:
+                    changes["interaction_history"] = _merge_interactions(
+                        histories.get(customer_id),
+                        changes["interaction_history"],
+                    )
+                if changes:
+                    saved = update_customer(customer_id, clerk_id, changes)
+                    latest[customer_id] = saved
+                    _remember_import_customer(saved, by_name, by_tax)
+                    histories[customer_id] = saved.get("interaction_history") or []
+                updated += 1
                 continue
-            if key:
-                seen.add(key)
-            payloads.append(payload)
+            result = (
+                supabase.table(TABLE)
+                .insert(
+                    _to_row(
+                        payload,
+                        clerk_id,
+                        include_history=True,
+                        default_payment_term_days=default_days,
+                    )
+                )
+                .execute()
+            )
+            if not result.data:
+                raise RuntimeError("Failed to create customer")
+            created = _format_customer(result.data[0])
+            created_id = str(created["id"])
+            latest[created_id] = created
+            _remember_import_customer(created, by_name, by_tax)
+            histories[created_id] = created.get("interaction_history") or []
+            imported += 1
     finally:
         workbook.close()
 
-    saved = create_customers(clerk_id, payloads)
     return {
-        "imported": len(saved),
+        "imported": imported,
+        "updated": updated,
         "skipped": skipped,
-        "duplicates": duplicates,
-        "customers": saved,
+        "duplicates": 0,
+        "customers": list(latest.values()),
     }
 
 
