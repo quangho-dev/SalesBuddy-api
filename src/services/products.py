@@ -48,6 +48,7 @@ HEADER_ALIASES = {
         "sku",
         "code",
         "ma",
+        "ma hang",
     },
     "name": {
         "ten san pham",
@@ -205,35 +206,53 @@ def _is_empty_payload(payload: dict) -> bool:
     return not has_text and not has_number
 
 
-def _identity_key(product_code, name) -> tuple[str, str] | None:
-    code = re.sub(r"\s+", " ", _text(product_code)).casefold()
-    product_name = re.sub(r"\s+", " ", _text(name)).casefold()
-    if not code and not product_name:
-        return None
-    return (code, product_name)
+def _fold_code(value) -> str:
+    return re.sub(r"\s+", " ", _text(value)).casefold()
 
 
-def _existing_product_keys(clerk_id: str) -> set[tuple[str, str]]:
-    keys: set[tuple[str, str]] = set()
+def _cell_is_blank(value) -> bool:
+    return value is None or (isinstance(value, str) and value.strip() == "")
+
+
+def _import_updates(values: tuple, mapping: dict[int, str]) -> dict:
+    updates = {}
+    for index, field in mapping.items():
+        if field == "product_code" or index >= len(values):
+            continue
+        value = values[index]
+        if _cell_is_blank(value):
+            continue
+        if field in NUMBER_FIELDS:
+            updates[field] = _parse_number(value)
+        else:
+            text = _cell_text(value)
+            if text:
+                updates[field] = text
+    return updates
+
+
+def _load_product_codes(clerk_id: str) -> dict[str, str]:
+    by_code: dict[str, str] = {}
     page_size = 1000
     start = 0
     while True:
         result = (
             supabase.table(TABLE)
-            .select("product_code, name")
+            .select("id, product_code")
             .eq("clerk_id", clerk_id)
+            .order("created_at")
             .range(start, start + page_size - 1)
             .execute()
         )
         rows = result.data or []
         for row in rows:
-            key = _identity_key(row.get("product_code"), row.get("name"))
-            if key:
-                keys.add(key)
+            code = _fold_code(row.get("product_code"))
+            if code and code not in by_code:
+                by_code[code] = str(row["id"])
         if len(rows) < page_size:
             break
         start += page_size
-    return keys
+    return by_code
 
 
 def create_products(clerk_id: str, payloads: list[dict]) -> list[dict]:
@@ -271,8 +290,10 @@ def import_products_from_xlsx(clerk_id: str, content: bytes) -> dict:
         payloads = []
         errors = []
         skipped = 0
-        duplicates = 0
-        seen = _existing_product_keys(clerk_id)
+        updated = 0
+        latest: dict[str, dict] = {}
+        by_code = _load_product_codes(clerk_id)
+        ensure_user(clerk_id)
         for row_number, values in enumerate(rows, start=2):
             values = values or ()
             if all(value is None or str(value).strip() == "" for value in values):
@@ -280,29 +301,43 @@ def import_products_from_xlsx(clerk_id: str, content: bytes) -> dict:
                 continue
             try:
                 payload = _row_payload(values, mapping)
+                changes = _import_updates(values, mapping)
             except (TypeError, ValueError):
                 errors.append({"row": row_number, "message": "Số không hợp lệ."})
                 continue
             if _is_empty_payload(payload):
                 skipped += 1
                 continue
-            key = _identity_key(payload.get("product_code"), payload.get("name"))
-            if key and key in seen:
-                duplicates += 1
+            code = _fold_code(payload.get("product_code"))
+            product_id = by_code.get(code) if code else None
+            if product_id:
+                if changes:
+                    saved = update_product(product_id, clerk_id, changes)
+                    latest[product_id] = saved
+                    saved_code = _fold_code(saved.get("product_code"))
+                    if saved_code:
+                        by_code[saved_code] = product_id
+                updated += 1
                 continue
-            if key:
-                seen.add(key)
+            result = supabase.table(TABLE).insert(_to_row(payload, clerk_id)).execute()
+            if not result.data:
+                raise RuntimeError("Failed to create product")
+            created = result.data[0]
+            created_id = str(created["id"])
+            latest[created_id] = created
+            if code:
+                by_code[code] = created_id
             payloads.append(payload)
     finally:
         workbook.close()
 
-    saved = create_products(clerk_id, payloads)
     return {
-        "imported": len(saved),
+        "imported": len(payloads),
+        "updated": updated,
         "skipped": skipped,
-        "duplicates": duplicates,
+        "duplicates": 0,
         "errors": errors,
-        "products": saved,
+        "products": list(latest.values()),
     }
 
 
