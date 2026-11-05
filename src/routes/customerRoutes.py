@@ -11,6 +11,7 @@ from src.services.customers import (
     build_customer_template,
     create_customer,
     delete_customer,
+    export_customers_xlsx,
     get_customer,
     import_customers_from_xlsx,
     list_customers,
@@ -29,6 +30,7 @@ class CustomerInteraction(BaseModel):
 
 
 class CreateCustomerRequest(BaseModel):
+    customer_code: str = ""
     company_name: str = ""
     contact_person: str = ""
     address: str = ""
@@ -43,6 +45,7 @@ class CreateCustomerRequest(BaseModel):
 
 
 class UpdateCustomerRequest(BaseModel):
+    customer_code: str | None = None
     company_name: str | None = None
     contact_person: str | None = None
     address: str | None = None
@@ -108,6 +111,24 @@ async def import_customers(
             status_code=500,
             detail=f"Failed to import customers: {str(e)}",
         )
+
+
+@router.get("/export")
+async def export_customers(
+    user_clerk_id: str = Depends(get_current_user_clerk_id),
+):
+    try:
+        content = export_customers_xlsx(user_clerk_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to export customers: {str(e)}",
+        )
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="khach-hang.xlsx"'},
+    )
 
 
 @router.get("/{customer_id}")

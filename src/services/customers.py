@@ -12,6 +12,7 @@ from src.services.users import ensure_user
 
 TABLE = "customers"
 TEXT_FIELDS = (
+    "customer_code",
     "company_name",
     "contact_person",
     "address",
@@ -35,6 +36,7 @@ class CustomerImportError(ValueError):
 
 
 TEMPLATE_HEADERS = (
+    "Mã khách hàng",
     "Tên công ty",
     "Điện thoại",
     "Người liên hệ",
@@ -55,6 +57,12 @@ _INTERACTION_LINE = re.compile(
 )
 
 HEADER_ALIASES = {
+    "customer_code": {
+        "ma khach hang",
+        "ma khach",
+        "customer code",
+        "customer id",
+    },
     "company_name": {
         "ten cong ty",
         "company name",
@@ -193,6 +201,7 @@ def _sort_interactions(items: list | None) -> list[dict]:
 
 
 def _format_customer(row: dict) -> dict:
+    row["customer_code"] = _text(row.get("customer_code"))
     row["interaction_history"] = _sort_interactions(row.get("interaction_history"))
     row["payment_term_days"] = _nonneg_int(row.get("payment_term_days"))
     return row
@@ -333,7 +342,7 @@ def _is_empty_payload(payload: dict) -> bool:
     return not any(_text(payload.get(field)) for field in TEXT_FIELDS)
 
 
-def _fold_company(value) -> str:
+def _fold_code(value) -> str:
     return re.sub(r"\s+", " ", _text(value)).casefold()
 
 
@@ -386,16 +395,19 @@ def _import_updates(payload: dict, mapped_fields: set[str]) -> dict:
     return updates
 
 
-def _load_import_index(clerk_id: str) -> tuple[dict[str, str], dict[str, str], dict[str, list]]:
-    by_name: dict[str, str] = {}
+def _load_import_index(
+    clerk_id: str,
+) -> tuple[dict[str, str], dict[str, str], dict[str, list], dict[str, dict]]:
+    by_code: dict[str, str] = {}
     by_tax: dict[str, str] = {}
     histories: dict[str, list] = {}
+    keys: dict[str, dict] = {}
     page_size = 1000
     start = 0
     while True:
         result = (
             supabase.table(TABLE)
-            .select("id, company_name, tax_code, interaction_history")
+            .select("id, customer_code, tax_code, interaction_history")
             .eq("clerk_id", clerk_id)
             .order("created_at")
             .range(start, start + page_size - 1)
@@ -405,40 +417,58 @@ def _load_import_index(clerk_id: str) -> tuple[dict[str, str], dict[str, str], d
         for row in rows:
             customer_id = str(row["id"])
             histories[customer_id] = row.get("interaction_history") or []
-            name = _fold_company(row.get("company_name"))
+            code = _fold_code(row.get("customer_code"))
             tax = _fold_tax(row.get("tax_code"))
-            if name and name not in by_name:
-                by_name[name] = customer_id
+            if code and code not in by_code:
+                by_code[code] = customer_id
             if tax and tax not in by_tax:
                 by_tax[tax] = customer_id
+            keys[customer_id] = {
+                "customer_code": row.get("customer_code") or "",
+                "tax_code": row.get("tax_code") or "",
+            }
         if len(rows) < page_size:
             break
         start += page_size
-    return by_name, by_tax, histories
+    return by_code, by_tax, histories, keys
 
 
 def _match_import_customer(
-    payload: dict, by_name: dict[str, str], by_tax: dict[str, str]
+    payload: dict, by_code: dict[str, str], by_tax: dict[str, str]
 ) -> str | None:
+    code = _fold_code(payload.get("customer_code"))
     tax = _fold_tax(payload.get("tax_code"))
-    name = _fold_company(payload.get("company_name"))
+    if code and code in by_code:
+        return by_code[code]
     if tax and tax in by_tax:
         return by_tax[tax]
-    if name and name in by_name:
-        return by_name[name]
     return None
 
 
 def _remember_import_customer(
-    customer: dict, by_name: dict[str, str], by_tax: dict[str, str]
+    customer: dict,
+    by_code: dict[str, str],
+    by_tax: dict[str, str],
+    keys: dict[str, dict],
 ) -> None:
     customer_id = str(customer["id"])
-    name = _fold_company(customer.get("company_name"))
+    previous = keys.get(customer_id) or {}
+    old_code = _fold_code(previous.get("customer_code"))
+    old_tax = _fold_tax(previous.get("tax_code"))
+    if old_code and by_code.get(old_code) == customer_id:
+        del by_code[old_code]
+    if old_tax and by_tax.get(old_tax) == customer_id:
+        del by_tax[old_tax]
+    code = _fold_code(customer.get("customer_code"))
     tax = _fold_tax(customer.get("tax_code"))
-    if name:
-        by_name[name] = customer_id
+    if code:
+        by_code[code] = customer_id
     if tax:
         by_tax[tax] = customer_id
+    keys[customer_id] = {
+        "customer_code": customer.get("customer_code") or "",
+        "tax_code": customer.get("tax_code") or "",
+    }
 
 
 def create_customers(clerk_id: str, payloads: list[dict]) -> list[dict]:
@@ -479,7 +509,7 @@ def import_customers_from_xlsx(clerk_id: str, content: bytes) -> dict:
         mapping = _map_headers(headers or ())
         if not mapping:
             raise CustomerImportError(
-                "Không nhận diện được cột. Hãy dùng file mẫu (Tên công ty, Điện thoại, Người liên hệ, Địa chỉ, Mã số thuế, Website, Facebook, Zalo, Lịch sử tương tác)."
+                "Không nhận diện được cột. Hãy dùng file mẫu (Mã khách hàng, Tên công ty, Điện thoại, Người liên hệ, Địa chỉ, Mã số thuế, Website, Facebook, Zalo, Lịch sử tương tác)."
             )
 
         mapped_fields = set(mapping.values())
@@ -487,7 +517,7 @@ def import_customers_from_xlsx(clerk_id: str, content: bytes) -> dict:
         imported = 0
         updated = 0
         latest: dict[str, dict] = {}
-        by_name, by_tax, histories = _load_import_index(clerk_id)
+        by_code, by_tax, histories, keys = _load_import_index(clerk_id)
         ensure_user(clerk_id)
         default_days = get_settings(clerk_id)["default_payment_term_days"]
         for values in rows:
@@ -499,7 +529,7 @@ def import_customers_from_xlsx(clerk_id: str, content: bytes) -> dict:
             if _is_empty_payload(payload):
                 skipped += 1
                 continue
-            customer_id = _match_import_customer(payload, by_name, by_tax)
+            customer_id = _match_import_customer(payload, by_code, by_tax)
             if customer_id:
                 changes = _import_updates(payload, mapped_fields)
                 if "interaction_history" in changes:
@@ -510,7 +540,7 @@ def import_customers_from_xlsx(clerk_id: str, content: bytes) -> dict:
                 if changes:
                     saved = update_customer(customer_id, clerk_id, changes)
                     latest[customer_id] = saved
-                    _remember_import_customer(saved, by_name, by_tax)
+                    _remember_import_customer(saved, by_code, by_tax, keys)
                     histories[customer_id] = saved.get("interaction_history") or []
                 updated += 1
                 continue
@@ -531,7 +561,7 @@ def import_customers_from_xlsx(clerk_id: str, content: bytes) -> dict:
             created = _format_customer(result.data[0])
             created_id = str(created["id"])
             latest[created_id] = created
-            _remember_import_customer(created, by_name, by_tax)
+            _remember_import_customer(created, by_code, by_tax, keys)
             histories[created_id] = created.get("interaction_history") or []
             imported += 1
     finally:
@@ -551,6 +581,66 @@ def build_customer_template() -> bytes:
     sheet = workbook.active
     sheet.title = "Khach hang"
     sheet.append(list(TEMPLATE_HEADERS))
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def _format_interaction_export(item: dict) -> str:
+    content = _text(item.get("content"))
+    if not content:
+        return ""
+    created_at = item.get("created_at")
+    moment = None
+    if isinstance(created_at, datetime):
+        moment = created_at
+    elif created_at:
+        try:
+            moment = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+        except ValueError:
+            moment = None
+    if moment is None:
+        return content
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    local = moment.astimezone(_LOCAL_TZ)
+    return f"{local.strftime('%d/%m/%Y %H:%M')} {content}"
+
+
+def _interaction_export_cell(items: list | None) -> str:
+    lines = []
+    for item in reversed(_sort_interactions(items)):
+        if not isinstance(item, dict):
+            continue
+        line = _format_interaction_export(item)
+        if line:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def _customer_export_row(customer: dict) -> list:
+    return [
+        _text(customer.get("customer_code")),
+        _text(customer.get("company_name")),
+        _text(customer.get("phone_number")),
+        _text(customer.get("contact_person")),
+        _text(customer.get("address")),
+        _text(customer.get("tax_code")),
+        _text(customer.get("website")),
+        _text(customer.get("facebook")),
+        _text(customer.get("zalo")),
+        _nonneg_int(customer.get("payment_term_days")),
+        _interaction_export_cell(customer.get("interaction_history")),
+    ]
+
+
+def export_customers_xlsx(clerk_id: str) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Khach hang"
+    sheet.append(list(TEMPLATE_HEADERS))
+    for customer in list_customers(clerk_id):
+        sheet.append(_customer_export_row(customer))
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
