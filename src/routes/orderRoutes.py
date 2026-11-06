@@ -3,7 +3,7 @@ from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from src.agents.order_file_agent import generate_order_file
 from src.services.clerkAuth import get_current_user_clerk_id
 from src.services.customers import CustomerNotFoundError
@@ -23,12 +23,21 @@ PaymentMethod = Literal["cash", "bank_transfer"]
 
 
 class OrderItemInput(BaseModel):
+    product_id: UUID | None = None
+    product_code: str = ""
     product_name: str = Field(min_length=1)
     unit: str = ""
     quantity: float = 0
     selling_price: float = 0
     vat_invoice: bool = False
     notes: str = ""
+
+    @field_validator("product_id", mode="before")
+    @classmethod
+    def empty_product_id(cls, value):
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        return value
 
 
 class CreateOrderRequest(BaseModel):

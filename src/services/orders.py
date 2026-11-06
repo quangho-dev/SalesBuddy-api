@@ -1,4 +1,5 @@
 from datetime import date, datetime, timezone
+from uuid import UUID
 from zoneinfo import ZoneInfo
 import re
 
@@ -13,6 +14,8 @@ CUSTOMER_EMBED = "id, company_name, contact_person, phone_number, address, tax_c
 SELECT_FIELDS = f"*, customers({CUSTOMER_EMBED}), order_items(*)"
 ITEM_FIELDS = (
     "id",
+    "product_id",
+    "product_code",
     "product_name",
     "unit",
     "quantity",
@@ -116,7 +119,17 @@ def _owned_customer(customer_id: str, clerk_id: str) -> dict:
     return get_customer(customer_id, clerk_id)
 
 
-def _normalize_items(items) -> list[dict]:
+def _product_id(value) -> str | None:
+    text = _text(value)
+    if not text:
+        return None
+    try:
+        return str(UUID(text))
+    except ValueError as error:
+        raise ValueError("Mã sản phẩm không hợp lệ.") from error
+
+
+def _normalize_items(items, clerk_id: str) -> list[dict]:
     if items is None:
         raise ValueError("items is required")
     if not isinstance(items, list):
@@ -124,6 +137,8 @@ def _normalize_items(items) -> list[dict]:
     if not items:
         raise ValueError("at least one item is required")
 
+    products = _products_for_owner(clerk_id)
+    by_id = {str(row["id"]): row for row in products}
     normalized = []
     for index, item in enumerate(items):
         if hasattr(item, "model_dump"):
@@ -133,8 +148,18 @@ def _normalize_items(items) -> list[dict]:
         product_name = _text(item.get("product_name"))
         if not product_name:
             raise ValueError("product_name is required for each item")
+        product_id = _product_id(item.get("product_id"))
+        if product_id and product_id not in by_id:
+            raise ValueError("Sản phẩm không thuộc tài khoản này.")
+        if not product_id:
+            matched = _match_product(products, {"product_name": product_name, "unit": item.get("unit")})
+            product_id = str(matched["id"]) if matched else None
+        product = by_id.get(product_id) if product_id else None
+        product_code = _text(product.get("product_code")) if product else _text(item.get("product_code"))
         normalized.append(
             {
+                "product_id": product_id,
+                "product_code": product_code,
                 "product_name": product_name,
                 "unit": _text(item.get("unit")),
                 "quantity": _number(item.get("quantity")),
@@ -242,7 +267,7 @@ def _name_key(value) -> str:
 def _products_for_owner(clerk_id: str) -> list[dict]:
     result = (
         supabase.table("products")
-        .select("id, name, unit, stock, created_at")
+        .select("id, product_code, name, unit, stock, created_at")
         .eq("clerk_id", clerk_id)
         .order("created_at")
         .execute()
@@ -251,6 +276,12 @@ def _products_for_owner(clerk_id: str) -> list[dict]:
 
 
 def _match_product(products: list[dict], item: dict) -> dict | None:
+    product_id = _text(item.get("product_id"))
+    if product_id:
+        for row in products:
+            if str(row.get("id")) == product_id:
+                return row
+        return None
     name = _name_key(item.get("product_name"))
     if not name:
         return None
@@ -352,7 +383,7 @@ def create_order(clerk_id: str, payload: dict) -> dict:
     quote_id = str(payload.get("quote_id") or "").strip()
     if quote_id and find_order_for_quote(quote_id, clerk_id):
         raise ValueError("Báo giá này đã có một đơn hàng.")
-    items = _normalize_items(payload.get("items"))
+    items = _normalize_items(payload.get("items"), clerk_id)
     payment = _payment_to_record(payload, items)
     if payment:
         payload = {
@@ -437,7 +468,7 @@ def update_order(order_id: str, clerk_id: str, payload: dict) -> dict:
 
     items = None
     if "items" in payload and payload["items"] is not None:
-        items = _normalize_items(payload["items"])
+        items = _normalize_items(payload["items"], clerk_id)
 
     payment = None
     clear_payments = was_paid and "is_paid" in updates and not updates["is_paid"]
@@ -505,7 +536,7 @@ def update_order(order_id: str, clerk_id: str, payload: dict) -> dict:
             {"is_delivered": was_delivered, "updated_at": _now()}
         ).eq("id", order_id).eq("clerk_id", clerk_id).execute()
         if items is not None and previous_items:
-            _replace_items(order_id, _normalize_items(previous_items))
+            _replace_items(order_id, _normalize_items(previous_items, clerk_id))
         raise
     return get_order(order_id, clerk_id)
 
