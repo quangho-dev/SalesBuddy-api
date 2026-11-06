@@ -30,6 +30,10 @@ class ProductImportError(ValueError):
     pass
 
 
+class DuplicateProductCodeError(ValueError):
+    pass
+
+
 TEMPLATE_HEADERS = (
     "Mã sản phẩm",
     "Tên sản phẩm",
@@ -413,9 +417,22 @@ def export_products_xlsx(clerk_id: str) -> bytes:
     return buffer.getvalue()
 
 
+def _assert_product_code_available(
+    clerk_id: str, product_code, exclude_id: str | None = None
+) -> None:
+    code = _fold_code(product_code)
+    if not code:
+        return
+    existing_id = _load_product_codes(clerk_id).get(code)
+    if existing_id and existing_id != exclude_id:
+        raise DuplicateProductCodeError("Mã sản phẩm đã tồn tại.")
+
+
 def create_product(clerk_id: str, payload: dict) -> dict:
     ensure_user(clerk_id)
-    result = supabase.table(TABLE).insert(_to_row(payload, clerk_id)).execute()
+    row = _to_row(payload, clerk_id)
+    _assert_product_code_available(clerk_id, row.get("product_code"))
+    result = supabase.table(TABLE).insert(row).execute()
     if not result.data:
         raise RuntimeError("Failed to create product")
     return result.data[0]
@@ -452,6 +469,9 @@ def update_product(product_id: str, clerk_id: str, payload: dict) -> dict:
             updates[field] = _number(payload[field])
     if not updates:
         return get_product(product_id, clerk_id)
+
+    if "product_code" in updates:
+        _assert_product_code_available(clerk_id, updates["product_code"], product_id)
 
     updates["updated_at"] = _now()
     result = (

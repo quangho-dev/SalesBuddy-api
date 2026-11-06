@@ -6,6 +6,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 from src.services.clerkAuth import get_current_user_clerk_id
 from src.services.products import (
+    DuplicateProductCodeError,
     ProductImportError,
     ProductNotFoundError,
     build_product_template,
@@ -141,6 +142,8 @@ async def add_product(
 ):
     try:
         return create_product(user_clerk_id, body.model_dump())
+    except DuplicateProductCodeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -162,6 +165,8 @@ async def edit_product(
         return update_product(str(product_id), user_clerk_id, payload)
     except ProductNotFoundError:
         raise HTTPException(status_code=404, detail="Product not found")
+    except DuplicateProductCodeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(
             status_code=500,
