@@ -7,12 +7,14 @@ from langchain.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMess
 from langchain.tools import tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_openai import ChatOpenAI
+from langchain_tavily import TavilySearch
 from langgraph.checkpoint.memory import InMemorySaver
 
 from src.rag.retrieval.index import retrieve_context
 from src.rag.retrieval.utils import get_ready_documents, public_document_excerpts
 from src.scripts.prompts import (
     GOOGLE_SHEETS_PROMPT,
+    WEB_SEARCH_PROMPT,
     chat_supervisor_prompt,
     document_assistant_prompt,
     sales_database_prompt,
@@ -46,12 +48,14 @@ _TOOL_STATUS = {
     "query_documents": "Đang đọc tài liệu...",
     "search_uploaded_documents": "Đang đọc tài liệu...",
     "query_google_sheets": "Đang tra cứu Google Sheets...",
+    "query_web": "Đang tìm trên web...",
+    "tavily_search": "Đang tìm trên web...",
 }
 
 
 def _is_supervisor_turn(metadata: dict | None) -> bool:
     tags = (metadata or {}).get("tags") or []
-    if "supabase" in tags or "google-sheets" in tags or "documents" in tags:
+    if "supabase" in tags or "google-sheets" in tags or "documents" in tags or "web" in tags:
         return False
     if "supervisor" in tags:
         return True
@@ -177,7 +181,7 @@ async def create_supervisor_tools(
     document_ids: list[str] | None = None,
     excerpts_out: list | None = None,
 ):
-    """Wrap the database, document, and Google Sheets agents as supervisor tools.
+    """Wrap the database, document, spreadsheet, and web agents as supervisor tools.
 
     Each specialist connects to its own tools only when the supervisor calls it.
     document_ids limits document search to the files the user selected.
@@ -296,7 +300,30 @@ async def create_supervisor_tools(
                 raise
             return f"Không tra được Google Sheets: {_error_text(exc)}"
 
-    return [query_supabase, query_documents, query_google_sheets]
+    @tool
+    async def query_web(query: str) -> str:
+        """Tìm thông tin công khai trên internet: tin tức, công ty, giá thị trường, quy định, địa chỉ, website.
+
+        Args:
+            query: Câu hỏi đầy đủ cần tìm trên web.
+        """
+        try:
+            web_agent = create_agent(
+                model=model,
+                tools=[TavilySearch(max_results=5, search_depth="advanced")],
+                system_prompt=WEB_SEARCH_PROMPT,
+            ).with_config({
+                "run_name": "chat_web_agent",
+                "tags": ["chat", "web"],
+            })
+            result = await web_agent.ainvoke(
+                {"messages": [HumanMessage(query)]},
+            )
+            return _message_text(result["messages"][-1])
+        except Exception as exc:
+            return f"Không tìm được trên web: {_error_text(exc)}"
+
+    return [query_supabase, query_documents, query_google_sheets, query_web]
 
 
 async def create_chat_supervisor(
@@ -304,7 +331,7 @@ async def create_chat_supervisor(
     document_ids: list[str] | None = None,
     excerpts_out: list | None = None,
 ):
-    """Supervisor that delegates database, document, and spreadsheet questions."""
+    """Supervisor that delegates database, document, spreadsheet, and web questions."""
     selected_names = None
     if document_ids is not None:
         selected_names = [
