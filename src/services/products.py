@@ -319,7 +319,7 @@ def _apply_product_updates(product_id: str, clerk_id: str, changes: dict) -> Non
     )
 
 
-def import_products_from_xlsx(clerk_id: str, content: bytes) -> dict:
+def parse_product_workbook(content: bytes) -> dict:
     try:
         workbook = load_workbook(BytesIO(content), read_only=True, data_only=True)
     except Exception as exc:
@@ -361,9 +361,25 @@ def import_products_from_xlsx(clerk_id: str, content: bytes) -> dict:
             if _is_empty_payload(payload):
                 skipped += 1
                 continue
-            parsed_rows.append((payload, changes))
+            parsed_rows.append(
+                {"row": row_number, "product": payload, "changes": changes}
+            )
     finally:
         workbook.close()
+
+    return {"rows": parsed_rows, "errors": errors, "skipped": skipped}
+
+
+def import_product_rows(clerk_id: str, rows: list[dict]) -> dict:
+    parsed_rows = []
+    for row in rows:
+        product = row.get("product") if isinstance(row, dict) else None
+        changes = row.get("changes") if isinstance(row, dict) else None
+        if not isinstance(product, dict):
+            raise ProductImportError("Dòng import không hợp lệ.")
+        if not isinstance(changes, dict):
+            changes = {}
+        parsed_rows.append((product, changes))
 
     by_code = _load_product_codes(clerk_id)
     new_payloads, updates_by_id, imported, updated = _plan_product_import(
@@ -372,15 +388,22 @@ def import_products_from_xlsx(clerk_id: str, content: bytes) -> dict:
     create_products(clerk_id, new_payloads)
     for product_id, changes in updates_by_id.items():
         _apply_product_updates(product_id, clerk_id, changes)
-
     return {
         "imported": imported,
         "updated": updated,
-        "skipped": skipped,
+        "skipped": 0,
         "duplicates": 0,
-        "errors": errors[:100],
+        "errors": [],
         "products": [],
     }
+
+
+def import_products_from_xlsx(clerk_id: str, content: bytes) -> dict:
+    parsed = parse_product_workbook(content)
+    result = import_product_rows(clerk_id, parsed["rows"])
+    result["skipped"] = parsed["skipped"]
+    result["errors"] = parsed["errors"][:100]
+    return result
 
 
 def build_product_template() -> bytes:

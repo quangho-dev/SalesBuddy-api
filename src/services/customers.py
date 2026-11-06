@@ -492,7 +492,21 @@ def create_customers(clerk_id: str, payloads: list[dict]) -> list[dict]:
     return saved
 
 
-def import_customers_from_xlsx(clerk_id: str, content: bytes) -> dict:
+def _json_customer_payload(payload: dict) -> dict:
+    ready = dict(payload)
+    history = []
+    for item in payload.get("interaction_history") or []:
+        if not isinstance(item, dict):
+            continue
+        created_at = item.get("created_at")
+        if hasattr(created_at, "isoformat"):
+            created_at = created_at.isoformat()
+        history.append({"content": item.get("content") or "", "created_at": created_at})
+    ready["interaction_history"] = history
+    return ready
+
+
+def parse_customer_workbook(content: bytes) -> dict:
     try:
         workbook = load_workbook(BytesIO(content), read_only=True, data_only=True)
     except Exception as exc:
@@ -512,14 +526,8 @@ def import_customers_from_xlsx(clerk_id: str, content: bytes) -> dict:
                 "Không nhận diện được cột. Hãy dùng file mẫu (Mã khách hàng, Tên công ty, Điện thoại, Người liên hệ, Địa chỉ, Mã số thuế, Website, Facebook, Zalo, Lịch sử tương tác)."
             )
 
-        mapped_fields = set(mapping.values())
+        parsed_rows = []
         skipped = 0
-        imported = 0
-        updated = 0
-        latest: dict[str, dict] = {}
-        by_code, by_tax, histories, keys = _load_import_index(clerk_id)
-        ensure_user(clerk_id)
-        default_days = get_settings(clerk_id)["default_payment_term_days"]
         for values in rows:
             values = values or ()
             if all(value is None or str(value).strip() == "" for value in values):
@@ -529,51 +537,83 @@ def import_customers_from_xlsx(clerk_id: str, content: bytes) -> dict:
             if _is_empty_payload(payload):
                 skipped += 1
                 continue
-            customer_id = _match_import_customer(payload, by_code, by_tax)
-            if customer_id:
-                changes = _import_updates(payload, mapped_fields)
-                if "interaction_history" in changes:
-                    changes["interaction_history"] = _merge_interactions(
-                        histories.get(customer_id),
-                        changes["interaction_history"],
-                    )
-                if changes:
-                    saved = update_customer(customer_id, clerk_id, changes)
-                    latest[customer_id] = saved
-                    _remember_import_customer(saved, by_code, by_tax, keys)
-                    histories[customer_id] = saved.get("interaction_history") or []
-                updated += 1
-                continue
-            result = (
-                supabase.table(TABLE)
-                .insert(
-                    _to_row(
-                        payload,
-                        clerk_id,
-                        include_history=True,
-                        default_payment_term_days=default_days,
-                    )
-                )
-                .execute()
-            )
-            if not result.data:
-                raise RuntimeError("Failed to create customer")
-            created = _format_customer(result.data[0])
-            created_id = str(created["id"])
-            latest[created_id] = created
-            _remember_import_customer(created, by_code, by_tax, keys)
-            histories[created_id] = created.get("interaction_history") or []
-            imported += 1
+            parsed_rows.append({"customer": _json_customer_payload(payload)})
     finally:
         workbook.close()
 
     return {
+        "rows": parsed_rows,
+        "mapped_fields": sorted(set(mapping.values())),
+        "skipped": skipped,
+    }
+
+
+def import_customer_rows(
+    clerk_id: str, rows: list[dict], mapped_fields: list[str] | set[str]
+) -> dict:
+    mapped = set(mapped_fields)
+    imported = 0
+    updated = 0
+    latest: dict[str, dict] = {}
+    by_code, by_tax, histories, keys = _load_import_index(clerk_id)
+    ensure_user(clerk_id)
+    default_days = get_settings(clerk_id)["default_payment_term_days"]
+    for row in rows:
+        payload = row.get("customer") if isinstance(row, dict) else None
+        if not isinstance(payload, dict):
+            raise CustomerImportError("Dòng import không hợp lệ.")
+        if _is_empty_payload(payload):
+            continue
+        customer_id = _match_import_customer(payload, by_code, by_tax)
+        if customer_id:
+            changes = _import_updates(payload, mapped)
+            if "interaction_history" in changes:
+                changes["interaction_history"] = _merge_interactions(
+                    histories.get(customer_id),
+                    changes["interaction_history"],
+                )
+            if changes:
+                saved = update_customer(customer_id, clerk_id, changes)
+                latest[customer_id] = saved
+                _remember_import_customer(saved, by_code, by_tax, keys)
+                histories[customer_id] = saved.get("interaction_history") or []
+            updated += 1
+            continue
+        result = (
+            supabase.table(TABLE)
+            .insert(
+                _to_row(
+                    payload,
+                    clerk_id,
+                    include_history=True,
+                    default_payment_term_days=default_days,
+                )
+            )
+            .execute()
+        )
+        if not result.data:
+            raise RuntimeError("Failed to create customer")
+        created = _format_customer(result.data[0])
+        created_id = str(created["id"])
+        latest[created_id] = created
+        _remember_import_customer(created, by_code, by_tax, keys)
+        histories[created_id] = created.get("interaction_history") or []
+        imported += 1
+
+    return {
         "imported": imported,
         "updated": updated,
-        "skipped": skipped,
+        "skipped": 0,
         "duplicates": 0,
         "customers": list(latest.values()),
     }
+
+
+def import_customers_from_xlsx(clerk_id: str, content: bytes) -> dict:
+    parsed = parse_customer_workbook(content)
+    result = import_customer_rows(clerk_id, parsed["rows"], parsed["mapped_fields"])
+    result["skipped"] = parsed["skipped"]
+    return result
 
 
 def build_customer_template() -> bytes:

@@ -1,4 +1,5 @@
 from datetime import datetime
+import asyncio
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -13,8 +14,10 @@ from src.services.customers import (
     delete_customer,
     export_customers_xlsx,
     get_customer,
+    import_customer_rows,
     import_customers_from_xlsx,
     list_customers,
+    parse_customer_workbook,
     update_customer,
 )
 
@@ -87,23 +90,80 @@ async def download_customer_template(
     )
 
 
-@router.post("/import")
-async def import_customers(
-    user_clerk_id: str = Depends(get_current_user_clerk_id),
-    file: UploadFile = File(...),
-):
+class CustomerImportRow(BaseModel):
+    customer: dict = Field(default_factory=dict)
+
+
+class ImportCustomerBatchRequest(BaseModel):
+    rows: list[CustomerImportRow] = Field(default_factory=list, max_length=80)
+    mapped_fields: list[str] = Field(default_factory=list)
+
+
+def _read_import_file(file: UploadFile, content: bytes) -> None:
     filename = (file.filename or "").lower()
     if not filename.endswith(".xlsx"):
         raise HTTPException(status_code=400, detail="Chỉ hỗ trợ file .xlsx")
-
-    content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="File Excel trống")
     if len(content) > MAX_IMPORT_BYTES:
         raise HTTPException(status_code=400, detail="File Excel vượt quá 5MB")
 
+
+@router.post("/import/parse")
+async def parse_customers_import(
+    _user_clerk_id: str = Depends(get_current_user_clerk_id),
+    file: UploadFile = File(...),
+):
+    content = await file.read()
+    _read_import_file(file, content)
     try:
-        return import_customers_from_xlsx(user_clerk_id, content)
+        return await asyncio.to_thread(parse_customer_workbook, content)
+    except CustomerImportError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to read customer file: {str(e)}",
+        )
+
+
+@router.post("/import/batch")
+async def import_customers_batch(
+    body: ImportCustomerBatchRequest,
+    user_clerk_id: str = Depends(get_current_user_clerk_id),
+):
+    if not body.rows:
+        raise HTTPException(status_code=400, detail="Không có dòng khách hàng để import.")
+    try:
+        return await asyncio.to_thread(
+            import_customer_rows,
+            user_clerk_id,
+            [row.model_dump() for row in body.rows],
+            body.mapped_fields,
+        )
+    except CustomerImportError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to import customers: {str(e)}",
+        )
+
+
+@router.post("/import")
+async def import_customers(
+    user_clerk_id: str = Depends(get_current_user_clerk_id),
+    file: UploadFile = File(...),
+):
+    content = await file.read()
+    _read_import_file(file, content)
+
+    try:
+        return await asyncio.to_thread(
+            import_customers_from_xlsx, user_clerk_id, content
+        )
     except CustomerImportError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
