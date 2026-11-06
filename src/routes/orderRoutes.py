@@ -33,7 +33,7 @@ class OrderItemInput(BaseModel):
 
 class CreateOrderRequest(BaseModel):
     customer_id: UUID
-    order_date: date | None = None
+    order_date: datetime | date | None = None
     notes: str = ""
     is_paid: bool = False
     is_delivered: bool = False
@@ -45,7 +45,7 @@ class CreateOrderRequest(BaseModel):
 
 class UpdateOrderRequest(BaseModel):
     customer_id: UUID | None = None
-    order_date: date | None = None
+    order_date: datetime | date | None = None
     notes: str | None = None
     is_paid: bool | None = None
     is_delivered: bool | None = None

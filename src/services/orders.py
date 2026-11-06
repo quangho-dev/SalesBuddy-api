@@ -1,4 +1,5 @@
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 import re
 
 from src.services.customers import CustomerNotFoundError, get_customer
@@ -76,7 +77,7 @@ def _bool(value) -> bool:
     return bool(value)
 
 
-def _timestamp(value) -> str | None:
+def _timestamp(value, invalid_message: str = "Thời gian giao hàng không hợp lệ.") -> str | None:
     if value is None or value == "":
         return None
     if isinstance(value, datetime):
@@ -88,20 +89,27 @@ def _timestamp(value) -> str | None:
         try:
             parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
         except ValueError as error:
-            raise ValueError("Thời gian giao hàng không hợp lệ.") from error
+            raise ValueError(invalid_message) from error
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc).isoformat()
 
 
-def _date(value) -> str:
+def _order_timestamp(value) -> str:
     if value is None or value == "":
-        return date.today().isoformat()
+        return _now()
     if isinstance(value, datetime):
-        return value.date().isoformat()
+        return _timestamp(value, "Ngày tạo đơn hàng không hợp lệ.") or _now()
     if isinstance(value, date):
-        return value.isoformat()
-    return str(value)[:10]
+        local = datetime(value.year, value.month, value.day, tzinfo=ZoneInfo("Asia/Ho_Chi_Minh"))
+        return local.astimezone(timezone.utc).isoformat()
+    text = str(value).strip()
+    if len(text) == 10 and text[4] == "-" and text[7] == "-":
+        return _order_timestamp(date.fromisoformat(text))
+    stamped = _timestamp(text, "Ngày tạo đơn hàng không hợp lệ.")
+    if not stamped:
+        raise ValueError("Ngày tạo đơn hàng không hợp lệ.")
+    return stamped
 
 
 def _owned_customer(customer_id: str, clerk_id: str) -> dict:
@@ -147,7 +155,7 @@ def _to_order_row(payload: dict, clerk_id: str) -> dict:
     row = {
         "clerk_id": clerk_id,
         "customer_id": customer_id,
-        "order_date": _date(payload.get("order_date")),
+        "order_date": _order_timestamp(payload.get("order_date")),
         "notes": _text(payload.get("notes")),
         "is_paid": _bool(payload.get("is_paid")),
         "is_delivered": _bool(payload.get("is_delivered")),
@@ -167,6 +175,7 @@ def _format_order(row: dict) -> dict:
     row["items"] = [
         {field: item.get(field) for field in ITEM_FIELDS} for item in items
     ]
+    row["order_date"] = _order_timestamp(row.get("order_date"))
     row["is_paid"] = _bool(row.get("is_paid"))
     row["is_delivered"] = _bool(row.get("is_delivered"))
     row["delivered_at"] = _timestamp(row.get("delivered_at"))
@@ -412,7 +421,7 @@ def update_order(order_id: str, clerk_id: str, payload: dict) -> dict:
         _owned_customer(customer_id, clerk_id)
         updates["customer_id"] = customer_id
     if "order_date" in payload and payload["order_date"] is not None:
-        updates["order_date"] = _date(payload["order_date"])
+        updates["order_date"] = _order_timestamp(payload["order_date"])
     if "notes" in payload and payload["notes"] is not None:
         updates["notes"] = _text(payload["notes"])
     if "is_paid" in payload and payload["is_paid"] is not None:

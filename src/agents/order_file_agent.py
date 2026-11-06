@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from src.agents.quote_file_agent import (
     _format_quote_date,
@@ -9,6 +10,21 @@ from src.services.googleDrive import ORDER_TEMPLATE_NAME, copy_quote_template
 from src.services.orders import get_order, save_order_drive_file
 from src.services.quoteSheet import fill_quote_spreadsheet
 from src.services.quotes import VAT_RATE
+
+
+def _vietnam_calendar_date(value: str) -> datetime | None:
+    text = value.strip()
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-" and text[:10].count("-") == 2:
+        if len(text) == 10:
+            year, month, day = (int(part) for part in text.split("-"))
+            return datetime(year, month, day)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(ZoneInfo("Asia/Ho_Chi_Minh"))
 
 
 def build_order_file_info(clerk_id: str, payload: dict) -> dict:
@@ -67,10 +83,11 @@ def build_order_file_info(clerk_id: str, payload: dict) -> dict:
         or _text((order or {}).get("order_date"))
         or _text((order or {}).get("created_at"))
     )
-    iso_date = date_source[:10] if date_source else ""
-    if len(iso_date) == 10 and iso_date[4] == "-" and iso_date[7] == "-":
-        year_s, month_s, day_s = iso_date.split("-")
-        date_text = f"Tp.Hồ Chí Minh {int(day_s)} tháng {int(month_s)} năm {int(year_s)}"
+    local_date = _vietnam_calendar_date(date_source)
+    if local_date:
+        date_text = (
+            f"Tp.Hồ Chí Minh {local_date.day} tháng {local_date.month} năm {local_date.year}"
+        )
     else:
         date_text = _format_quote_date(date_source)
     return {
