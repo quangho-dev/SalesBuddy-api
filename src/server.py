@@ -13,6 +13,8 @@ from src.routes.paymentRoutes import router as paymentRoutes
 from src.routes.settingsRoutes import router as settingsRoutes
 from src.routes.googleSheetsRoutes import router as googleSheetsRoutes
 from src.routes.documentRoutes import router as documentRoutes
+from src.routes.deliveryRoutes import router as deliveryRoutes
+from src.routes.deliveryRoutes import settings_router as deliverySettingsRoutes
 from src.services.googleSheetsAuth import finish_sheets_login
 
 # Create FastAPI app
@@ -41,6 +43,8 @@ app.include_router(paymentRoutes, prefix="/api/payments")
 app.include_router(settingsRoutes, prefix="/api/settings")
 app.include_router(googleSheetsRoutes, prefix="/api/google/sheets")
 app.include_router(documentRoutes, prefix="/api/documents")
+app.include_router(deliveryRoutes, prefix="/api/deliveries")
+app.include_router(deliverySettingsRoutes, prefix="/api/delivery-settings")
 
 
 @app.get("/")
