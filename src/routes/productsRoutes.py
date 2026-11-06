@@ -11,6 +11,7 @@ from src.services.products import (
     build_product_template,
     create_product,
     delete_product,
+    export_products_xlsx,
     get_product,
     import_products_from_xlsx,
     list_products,
@@ -96,6 +97,24 @@ async def import_products(
             status_code=500,
             detail=f"Failed to import products: {str(e)}",
         )
+
+
+@router.get("/export")
+async def export_products(
+    user_clerk_id: str = Depends(get_current_user_clerk_id),
+):
+    try:
+        content = export_products_xlsx(user_clerk_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to export products: {str(e)}",
+        )
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="san-pham.xlsx"'},
+    )
 
 
 @router.get("/{product_id}")

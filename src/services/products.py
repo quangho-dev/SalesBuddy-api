@@ -389,6 +389,30 @@ def build_product_template() -> bytes:
     return buffer.getvalue()
 
 
+def _product_export_row(product: dict) -> list:
+    return [
+        _text(product.get("product_code")),
+        _text(product.get("name")),
+        _text(product.get("unit")),
+        _number(product.get("selling_price")),
+        _number(product.get("stock")),
+        _text(product.get("notes")),
+        _text(product.get("product_type")),
+    ]
+
+
+def export_products_xlsx(clerk_id: str) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "San pham"
+    sheet.append(list(TEMPLATE_HEADERS))
+    for product in list_products(clerk_id):
+        sheet.append(_product_export_row(product))
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
 def create_product(clerk_id: str, payload: dict) -> dict:
     ensure_user(clerk_id)
     result = supabase.table(TABLE).insert(_to_row(payload, clerk_id)).execute()
