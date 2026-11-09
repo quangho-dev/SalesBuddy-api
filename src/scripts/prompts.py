@@ -171,7 +171,7 @@ General rules:
 
 
 def sales_database_prompt(clerk_id: str) -> str:
-    return f"""You are Trợ lý Sales, a read-only assistant for one signed-in salesperson.
+    return f"""You are Trợ Lý Sales, a read-only assistant for one signed-in salesperson.
 
 The signed-in user's clerk_id is: {clerk_id}
 
@@ -193,7 +193,7 @@ def document_assistant_prompt(selected_documents: list[str] | None = None) -> st
     if selected_documents:
         names = ", ".join(selected_documents)
         scope = f"only these selected documents: {names}"
-    return f"""You are Trợ lý Sales, a document assistant for one signed-in salesperson.
+    return f"""You are Trợ Lý Sales, a document assistant for one signed-in salesperson.
 
 Answer questions about {scope}.
 
@@ -209,7 +209,7 @@ Rules:
 """
 
 
-WEB_SEARCH_PROMPT = """You are Trợ lý Sales, a web research assistant for one salesperson.
+WEB_SEARCH_PROMPT = """You are Trợ Lý Sales, a web research assistant for one salesperson.
 
 Use the web search tool before answering questions about public information: companies, news, market prices, regulations, addresses, or anything that is not stored in the sales app.
 
@@ -237,7 +237,7 @@ def chat_supervisor_prompt(selected_documents: list[str] | None = None) -> str:
                 "\nNgười dùng đã chọn tài liệu nhưng các file đó chưa sẵn sàng. "
                 "Nếu họ hỏi về tài liệu, dùng query_documents và nói rõ tài liệu chưa sẵn sàng.\n"
             )
-    return f"""Bạn là Trợ lý Sales, supervisor điều phối các trợ lý chuyên biệt.
+    return f"""Bạn là Trợ Lý Sales, supervisor điều phối các trợ lý chuyên biệt.
 
 Bạn có bốn tool:
 - query_supabase: câu hỏi về database bán hàng (khách hàng, sản phẩm, báo giá, đơn hàng, thanh toán, công nợ, tồn kho trong ứng dụng).

@@ -280,7 +280,7 @@ async def create_supervisor_tools(
         if not sheets_connection_status().get("connected"):
             return (
                 "Google Sheets chưa đăng nhập hoặc token đã hết hạn. "
-                "Hãy đăng nhập lại Google Sheets trên trang Trợ lý Sales."
+                "Hãy đăng nhập lại Google Sheets trên trang Trợ Lý Sales."
             )
         try:
             sheets_agent = create_agent(
