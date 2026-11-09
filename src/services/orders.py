@@ -12,6 +12,7 @@ ITEMS_TABLE = "order_items"
 VAT_RATE = 0.1
 CUSTOMER_EMBED = "id, company_name, contact_person, phone_number, address, tax_code, payment_term_days"
 SELECT_FIELDS = f"*, customers({CUSTOMER_EMBED}), order_items(*)"
+_ORDER_CODE = re.compile(r"^DH-(\d+)$", re.IGNORECASE)
 ITEM_FIELDS = (
     "id",
     "product_id",
@@ -200,6 +201,7 @@ def _format_order(row: dict) -> dict:
     row["items"] = [
         {field: item.get(field) for field in ITEM_FIELDS} for item in items
     ]
+    row["order_code"] = _text(row.get("order_code"))
     row["order_date"] = _order_timestamp(row.get("order_date"))
     row["is_paid"] = _bool(row.get("is_paid"))
     row["is_delivered"] = _bool(row.get("is_delivered"))
@@ -365,6 +367,30 @@ def _replace_items(order_id: str, items: list[dict]) -> None:
         raise RuntimeError("Failed to save order items")
 
 
+def _next_order_code(clerk_id: str) -> str:
+    highest = 0
+    start = 0
+    page_size = 1000
+    while True:
+        result = (
+            supabase.table(TABLE)
+            .select("order_code")
+            .eq("clerk_id", clerk_id)
+            .order("id")
+            .range(start, start + page_size - 1)
+            .execute()
+        )
+        rows = result.data or []
+        for row in rows:
+            match = _ORDER_CODE.match(_text(row.get("order_code")))
+            if match:
+                highest = max(highest, int(match.group(1)))
+        if len(rows) < page_size:
+            break
+        start += page_size
+    return f"DH-{highest + 1:05d}"
+
+
 def find_order_for_quote(quote_id: str, clerk_id: str) -> dict | None:
     result = (
         supabase.table(TABLE)
@@ -391,11 +417,9 @@ def create_order(clerk_id: str, payload: dict) -> dict:
             "payment_method": payment["payment_method"],
             "paid_amount": payment["amount"],
         }
-    result = (
-        supabase.table(TABLE)
-        .insert(_to_order_row(payload, clerk_id))
-        .execute()
-    )
+    row = _to_order_row(payload, clerk_id)
+    row["order_code"] = _next_order_code(clerk_id)
+    result = supabase.table(TABLE).insert(row).execute()
     if not result.data:
         raise RuntimeError("Failed to create order")
     order_id = result.data[0]["id"]

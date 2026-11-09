@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from src.services.supabase import supabase
+from src.services.users import UserEmailRequiredError, email_from_clerk_payload, link_user
 
 router = APIRouter(tags=["userRoutes"])
 
@@ -46,24 +46,17 @@ async def create_user(clerk_webhook_data: dict):
                 status_code=400, detail="Missing or invalid clerk_id in user data"
             )
 
-        # Check if user already exists to prevent duplicates
-        existing_user = (
-            supabase.table("users")
-            .select("clerk_id")
-            .eq("clerk_id", clerk_id)
-            .execute()
-        )
-        if existing_user.data:
-            return {"message": "User already exists", "clerk_id": clerk_id}
-
-        # Create new user in database
-        result = supabase.table("users").insert({"clerk_id": clerk_id}).execute()
-        if not result.data:
+        email = email_from_clerk_payload(user_data)
+        if not email:
             raise HTTPException(
-                status_code=500, detail="Failed to create user in database"
+                status_code=400, detail="Missing email address in user data"
             )
 
-        return {"message": "User created successfully", "user": result.data[0]}
+        try:
+            user = link_user(clerk_id, email)
+        except UserEmailRequiredError as error:
+            raise HTTPException(status_code=400, detail=str(error))
+        return {"message": "User linked successfully", "user": user}
 
     except HTTPException as e:
         raise e
