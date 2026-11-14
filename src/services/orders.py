@@ -1,7 +1,11 @@
 from datetime import date, datetime, timezone
+from io import BytesIO
 from uuid import UUID
 from zoneinfo import ZoneInfo
 import re
+
+from openpyxl import Workbook
+from openpyxl.styles import Font
 
 from src.services.customers import CustomerNotFoundError, get_customer
 from src.services.supabase import supabase
@@ -12,6 +16,7 @@ ITEMS_TABLE = "order_items"
 VAT_RATE = 0.1
 CUSTOMER_EMBED = "id, company_name, contact_person, phone_number, address, tax_code, payment_term_days"
 SELECT_FIELDS = f"*, customers({CUSTOMER_EMBED}), order_items(*)"
+_ORDER_CODE = re.compile(r"^DH-(\d+)$", re.IGNORECASE)
 ITEM_FIELDS = (
     "id",
     "product_id",
@@ -200,6 +205,7 @@ def _format_order(row: dict) -> dict:
     row["items"] = [
         {field: item.get(field) for field in ITEM_FIELDS} for item in items
     ]
+    row["order_code"] = _text(row.get("order_code"))
     row["order_date"] = _order_timestamp(row.get("order_date"))
     row["is_paid"] = _bool(row.get("is_paid"))
     row["is_delivered"] = _bool(row.get("is_delivered"))
@@ -365,6 +371,30 @@ def _replace_items(order_id: str, items: list[dict]) -> None:
         raise RuntimeError("Failed to save order items")
 
 
+def _next_order_code(clerk_id: str) -> str:
+    highest = 0
+    start = 0
+    page_size = 1000
+    while True:
+        result = (
+            supabase.table(TABLE)
+            .select("order_code")
+            .eq("clerk_id", clerk_id)
+            .order("id")
+            .range(start, start + page_size - 1)
+            .execute()
+        )
+        rows = result.data or []
+        for row in rows:
+            match = _ORDER_CODE.match(_text(row.get("order_code")))
+            if match:
+                highest = max(highest, int(match.group(1)))
+        if len(rows) < page_size:
+            break
+        start += page_size
+    return f"DH-{highest + 1:05d}"
+
+
 def find_order_for_quote(quote_id: str, clerk_id: str) -> dict | None:
     result = (
         supabase.table(TABLE)
@@ -391,11 +421,9 @@ def create_order(clerk_id: str, payload: dict) -> dict:
             "payment_method": payment["payment_method"],
             "paid_amount": payment["amount"],
         }
-    result = (
-        supabase.table(TABLE)
-        .insert(_to_order_row(payload, clerk_id))
-        .execute()
-    )
+    row = _to_order_row(payload, clerk_id)
+    row["order_code"] = _next_order_code(clerk_id)
+    result = supabase.table(TABLE).insert(row).execute()
     if not result.data:
         raise RuntimeError("Failed to create order")
     order_id = result.data[0]["id"]
@@ -419,19 +447,160 @@ def list_orders(
     customer_id: str | None = None,
     is_paid: bool | None = None,
 ) -> list[dict]:
-    query = (
-        supabase.table(TABLE)
-        .select(SELECT_FIELDS)
-        .eq("clerk_id", clerk_id)
-        .order("order_date", desc=True)
-        .order("created_at", desc=True)
-    )
-    if customer_id:
-        query = query.eq("customer_id", customer_id)
-    if is_paid is not None:
-        query = query.eq("is_paid", is_paid)
-    result = query.execute()
-    return [_format_order(row) for row in (result.data or [])]
+    page_size = 1000
+    start = 0
+    rows: list[dict] = []
+    while True:
+        query = (
+            supabase.table(TABLE)
+            .select(SELECT_FIELDS)
+            .eq("clerk_id", clerk_id)
+            .order("order_date", desc=True)
+            .order("created_at", desc=True)
+        )
+        if customer_id:
+            query = query.eq("customer_id", customer_id)
+        if is_paid is not None:
+            query = query.eq("is_paid", is_paid)
+        result = query.range(start, start + page_size - 1).execute()
+        batch = result.data or []
+        rows.extend(_format_order(row) for row in batch)
+        if len(batch) < page_size:
+            return rows
+        start += page_size
+
+
+_ORDER_EXPORT_HEADERS = (
+    "Mã đơn",
+    "Ngày đơn",
+    "Khách hàng",
+    "Người liên hệ",
+    "Số điện thoại",
+    "Địa chỉ",
+    "Mã số thuế",
+    "Thanh toán",
+    "Hình thức thanh toán",
+    "Đã trả",
+    "Còn lại",
+    "Giao hàng",
+    "Ngày giao",
+    "VAT",
+    "Số sản phẩm",
+    "Sản phẩm",
+    "Tạm tính",
+    "Tiền VAT",
+    "Tổng tiền",
+    "Ghi chú",
+)
+
+
+def _local_moment(value) -> str:
+    text = _text(value)
+    if not text:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(ZoneInfo("Asia/Ho_Chi_Minh")).strftime("%d/%m/%Y %H:%M")
+
+
+def _customer_field(order: dict, field: str) -> str:
+    customer = order.get("customers") or {}
+    if isinstance(customer, list):
+        customer = customer[0] if customer else {}
+    if not isinstance(customer, dict):
+        return ""
+    return _text(customer.get(field))
+
+
+def _export_money(items: list[dict]) -> tuple[float, int, float]:
+    subtotal = 0.0
+    vat = 0
+    for item in items:
+        line = _number(item.get("quantity")) * _number(item.get("selling_price"))
+        subtotal += line
+        if item.get("vat_invoice"):
+            vat += int(line * VAT_RATE + 0.5)
+    return subtotal, vat, subtotal + vat
+
+
+def _money_cell(value: float):
+    rounded = round(value + 1e-9, 2)
+    if rounded == int(rounded):
+        return int(rounded)
+    return rounded
+
+
+def _export_item_label(item: dict) -> str:
+    name = _text(item.get("product_name"))
+    if not name:
+        return ""
+    code = _text(item.get("product_code"))
+    quantity = _number(item.get("quantity"))
+    unit = _text(item.get("unit"))
+    amount = str(int(quantity)) if quantity == int(quantity) else str(quantity)
+    label = f"{code} · {name}" if code else name
+    return f"{label} × {amount} {unit}".strip()
+
+
+def _order_export_row(order: dict) -> list:
+    items = order.get("items") or []
+    subtotal, vat, grand = _export_money(items)
+    paid = _paid_amount(order.get("paid_amount"))
+    remaining = 0.0 if order.get("is_paid") else max(grand - paid, 0)
+    method = order.get("payment_method")
+    if method == "cash":
+        method_label = "Tiền mặt"
+    elif method == "bank_transfer":
+        method_label = "Chuyển khoản"
+    else:
+        method_label = ""
+    products = ", ".join(label for label in (_export_item_label(item) for item in items) if label)
+    return [
+        _text(order.get("order_code")),
+        _local_moment(order.get("order_date")),
+        _customer_field(order, "company_name") or _customer_field(order, "contact_person"),
+        _customer_field(order, "contact_person"),
+        _customer_field(order, "phone_number"),
+        _customer_field(order, "address"),
+        _customer_field(order, "tax_code"),
+        "Đã thanh toán" if order.get("is_paid") else "Chưa thanh toán",
+        method_label,
+        _money_cell(paid),
+        _money_cell(remaining),
+        "Đã giao hàng" if order.get("is_delivered") else "Chưa giao hàng",
+        _local_moment(order.get("delivered_at")),
+        "Có" if any(item.get("vat_invoice") for item in items) else "Không",
+        len(items),
+        products,
+        _money_cell(subtotal),
+        vat,
+        _money_cell(grand),
+        _text(order.get("notes")),
+    ]
+
+
+def export_orders_xlsx(clerk_id: str) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Don hang"
+    sheet.append(list(_ORDER_EXPORT_HEADERS))
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+    for order in list_orders(clerk_id):
+        sheet.append(_order_export_row(order))
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = sheet.dimensions
+    widths = (14, 18, 28, 22, 16, 36, 16, 18, 22, 14, 14, 16, 18, 10, 14, 48, 14, 14, 14, 28)
+    for index, width in enumerate(widths, start=1):
+        column = sheet.cell(row=1, column=index).column_letter
+        sheet.column_dimensions[column].width = width
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
 
 
 def get_order(order_id: str, clerk_id: str) -> dict:

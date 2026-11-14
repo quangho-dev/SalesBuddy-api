@@ -3,6 +3,7 @@ from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
 from src.agents.order_file_agent import generate_order_file
 from src.services.clerkAuth import get_current_user_clerk_id
@@ -12,6 +13,7 @@ from src.services.orders import (
     OrderNotFoundError,
     create_order,
     delete_order,
+    export_orders_xlsx,
     get_order,
     list_orders,
     update_order,
@@ -100,6 +102,24 @@ async def list_all_orders(
             status_code=500,
             detail=f"Failed to list orders: {str(e)}",
         )
+
+
+@router.get("/export")
+async def export_orders(
+    user_clerk_id: str = Depends(get_current_user_clerk_id),
+):
+    try:
+        content = export_orders_xlsx(user_clerk_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to export orders: {str(e)}",
+        )
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="danh-sach-don-hang.xlsx"'},
+    )
 
 
 @router.post("/generate-file")
