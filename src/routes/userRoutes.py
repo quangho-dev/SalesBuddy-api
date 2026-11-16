@@ -1,7 +1,48 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+from src.services.clerkAuth import get_current_user_clerk_id
+from src.services.organizations import (
+    OrganizationInputError,
+    get_current_user,
+    join_organization,
+)
 from src.services.supabase import supabase
 
 router = APIRouter(tags=["userRoutes"])
+
+
+class JoinOrganizationRequest(BaseModel):
+    name: str = ""
+    tax_code: str = ""
+
+
+@router.get("/me")
+async def read_current_user(
+    user_clerk_id: str = Depends(get_current_user_clerk_id),
+):
+    try:
+        return get_current_user(user_clerk_id)
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load user: {str(error)}",
+        )
+
+
+@router.post("/organization")
+async def assign_organization(
+    body: JoinOrganizationRequest,
+    user_clerk_id: str = Depends(get_current_user_clerk_id),
+):
+    try:
+        return join_organization(user_clerk_id, body.name, body.tax_code)
+    except OrganizationInputError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to assign organization: {str(error)}",
+        )
 
 
 @router.post("/create")
