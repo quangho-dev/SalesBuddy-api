@@ -83,6 +83,34 @@ def open_chat_thread(clerk_id: str, thread_id: str | None, question: str) -> tup
     return create_chat_thread(clerk_id, _title_from_question(question)), True
 
 
+def rename_chat_thread(clerk_id: str, thread_id: str, title: str) -> dict:
+    thread = get_chat_thread(clerk_id, thread_id)
+    if not thread:
+        raise LookupError("Chat thread not found.")
+    title = re.sub(r"\s+", " ", title).strip()
+    if not title:
+        raise ValueError("Hãy nhập tiêu đề.")
+    if len(title) > 120:
+        raise ValueError("Tiêu đề tối đa 120 ký tự.")
+    result = (
+        supabase.table(THREADS)
+        .update({"title": title})
+        .eq("id", thread["id"])
+        .eq("clerk_id", clerk_id)
+        .execute()
+    )
+    if not result.data:
+        raise RuntimeError("Failed to rename chat thread")
+    return result.data[0]
+
+
+def delete_chat_thread(clerk_id: str, thread_id: str) -> None:
+    thread = get_chat_thread(clerk_id, thread_id)
+    if not thread:
+        raise LookupError("Chat thread not found.")
+    supabase.table(THREADS).delete().eq("id", thread["id"]).eq("clerk_id", clerk_id).execute()
+
+
 def discard_chat_thread(clerk_id: str, thread_id: str) -> None:
     parsed = _parse_thread_id(thread_id)
     if not parsed:
