@@ -5,10 +5,19 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from src.agents.chat_supervisor_agent import stream_chat_supervisor
-from src.services.chatHistory import list_chat_messages, list_chat_threads
+from src.services.chatHistory import (
+    delete_chat_thread,
+    list_chat_messages,
+    list_chat_threads,
+    rename_chat_thread,
+)
 from src.services.clerkAuth import get_current_user_clerk_id
 
 router = APIRouter(tags=["chatRoutes"])
+
+
+class RenameThreadRequest(BaseModel):
+    title: str = ""
 
 
 class ChatRequest(BaseModel):
@@ -52,6 +61,42 @@ async def chat_threads(
             status_code=500,
             detail=f"Failed to load chat threads: {_error_text(exc)}",
         )
+
+
+@router.patch("/threads/{thread_id}")
+async def rename_thread(
+    thread_id: str,
+    body: RenameThreadRequest,
+    user_clerk_id: str = Depends(get_current_user_clerk_id),
+):
+    try:
+        return rename_chat_thread(user_clerk_id, thread_id, body.title)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Chat thread not found.")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to rename chat thread: {_error_text(exc)}",
+        )
+
+
+@router.delete("/threads/{thread_id}")
+async def delete_thread(
+    thread_id: str,
+    user_clerk_id: str = Depends(get_current_user_clerk_id),
+):
+    try:
+        delete_chat_thread(user_clerk_id, thread_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Chat thread not found.")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete chat thread: {_error_text(exc)}",
+        )
+    return {"deleted": True}
 
 
 @router.get("/threads/{thread_id}/messages")
