@@ -4,14 +4,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from src.agents.quote_file_agent import generate_quote_file
 from src.services.clerkAuth import get_current_user_clerk_id
-from src.services.customers import CustomerNotFoundError
+from src.services.customers import CustomerAccessError, CustomerNotFoundError
 from src.services.googleDrive import QuoteTemplateNotFoundError
 from src.services.quotes import (
     QuoteNotFoundError,
     convert_quote_to_order,
     create_quote,
     delete_quote,
-    get_quote,
+    get_visible_quote,
     list_quotes,
     set_quote_status,
     update_quote,
@@ -68,13 +68,17 @@ class GenerateQuoteFileRequest(BaseModel):
 @router.get("/")
 async def list_all_quotes(
     customer_id: UUID | None = Query(default=None),
+    owner_clerk_id: str | None = Query(default=None),
     user_clerk_id: str = Depends(get_current_user_clerk_id),
 ):
     try:
         return list_quotes(
             user_clerk_id,
             customer_id=str(customer_id) if customer_id else None,
+            owner_clerk_id=owner_clerk_id,
         )
+    except CustomerAccessError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -158,7 +162,7 @@ async def get_quote_detail(
     user_clerk_id: str = Depends(get_current_user_clerk_id),
 ):
     try:
-        return get_quote(str(quote_id), user_clerk_id)
+        return get_visible_quote(str(quote_id), user_clerk_id)
     except QuoteNotFoundError:
         raise HTTPException(status_code=404, detail="Quote not found")
     except Exception as e:

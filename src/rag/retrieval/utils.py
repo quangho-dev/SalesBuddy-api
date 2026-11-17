@@ -8,18 +8,33 @@ from src.models.index import QueryVariations
 
 
 def get_ready_documents(clerk_id, document_ids=None):
-    """Ready documents owned by this user, optionally limited to the given ids."""
+    """Ready documents this user may read, optionally limited to the given ids."""
+    from src.services.documents import document_owner_scope
+
     try:
+        owner_ids, labels = document_owner_scope(clerk_id)
         query = (
             supabase.table("sales_documents")
-            .select("id, filename")
-            .eq("clerk_id", clerk_id)
+            .select("id, filename, clerk_id")
+            .in_("clerk_id", owner_ids)
             .eq("status", "ready")
         )
         if document_ids:
             query = query.in_("id", document_ids)
         result = query.execute()
-        rows = result.data or []
+        rows = []
+        for row in result.data or []:
+            owner_id = str(row.get("clerk_id") or "")
+            label = labels.get(owner_id) or {}
+            rows.append(
+                {
+                    "id": row["id"],
+                    "filename": row["filename"],
+                    "owner_name": str(label.get("name") or "").strip(),
+                    "owner_email": str(label.get("email") or "").strip(),
+                    "is_owner": owner_id == clerk_id,
+                }
+            )
         if document_ids:
             order = {doc_id: index for index, doc_id in enumerate(document_ids)}
             rows.sort(key=lambda row: order.get(row["id"], len(order)))
@@ -29,22 +44,7 @@ def get_ready_documents(clerk_id, document_ids=None):
 
 
 def get_ready_document_ids(clerk_id):
-    try:
-        document_ids_result = (
-            supabase.table("sales_documents")
-            .select("id")
-            .eq("clerk_id", clerk_id)
-            .eq("status", "ready")
-            .execute()
-        )
-
-        if not document_ids_result.data:
-            return []
-
-        document_ids = [document["id"] for document in document_ids_result.data]
-        return document_ids
-    except Exception as e:
-        raise Exception(f"Failed to get document IDs: {str(e)}")
+    return [row["id"] for row in get_ready_documents(clerk_id)]
 
 
 def build_context_from_retrieved_chunks(
@@ -131,6 +131,7 @@ def public_document_excerpts(citations: List[Dict], limit: int = 8) -> List[Dict
     for citation in citations or []:
         excerpt = str(citation.get("excerpt") or "").strip()
         filename = str(citation.get("filename") or "").strip() or "Tài liệu"
+        owner = str(citation.get("owner") or "").strip()
         if not excerpt:
             continue
         if len(excerpt) > 700:
@@ -138,11 +139,13 @@ def public_document_excerpts(citations: List[Dict], limit: int = 8) -> List[Dict
         page = citation.get("page")
         if page in (None, "", "Unknown"):
             page = None
-        key = (filename, str(page), excerpt)
+        key = (filename, owner, str(page), excerpt)
         if key in seen:
             continue
         seen.add(key)
         item = {"filename": filename, "excerpt": excerpt}
+        if owner:
+            item["owner"] = owner
         if page is not None:
             item["page"] = page
         items.append(item)

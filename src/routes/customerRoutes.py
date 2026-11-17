@@ -2,20 +2,22 @@ from datetime import datetime
 import asyncio
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from src.services.clerkAuth import get_current_user_clerk_id
 from src.services.customers import (
+    CustomerAccessError,
     CustomerImportError,
     CustomerNotFoundError,
     build_customer_template,
     create_customer,
     delete_customer,
     export_customers_xlsx,
-    get_customer,
+    get_visible_customer,
     import_customer_rows,
     import_customers_from_xlsx,
+    list_customer_owners,
     list_customers,
     parse_customer_workbook,
     update_customer,
@@ -65,14 +67,30 @@ class UpdateCustomerRequest(BaseModel):
 @router.get("")
 @router.get("/")
 async def list_all_customers(
+    owner_clerk_id: str | None = Query(default=None),
     user_clerk_id: str = Depends(get_current_user_clerk_id),
 ):
     try:
-        return list_customers(user_clerk_id)
+        return list_customers(user_clerk_id, owner_clerk_id)
+    except CustomerAccessError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail=f"Failed to list customers: {str(e)}",
+        )
+
+
+@router.get("/owners")
+async def customer_owners(
+    user_clerk_id: str = Depends(get_current_user_clerk_id),
+):
+    try:
+        return {"owners": list_customer_owners(user_clerk_id)}
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to list customer owners: {str(e)}",
         )
 
 
@@ -175,10 +193,13 @@ async def import_customers(
 
 @router.get("/export")
 async def export_customers(
+    owner_clerk_id: str | None = Query(default=None),
     user_clerk_id: str = Depends(get_current_user_clerk_id),
 ):
     try:
-        content = export_customers_xlsx(user_clerk_id)
+        content = export_customers_xlsx(user_clerk_id, owner_clerk_id)
+    except CustomerAccessError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -197,7 +218,7 @@ async def get_customer_detail(
     user_clerk_id: str = Depends(get_current_user_clerk_id),
 ):
     try:
-        return get_customer(str(customer_id), user_clerk_id)
+        return get_visible_customer(str(customer_id), user_clerk_id)
     except CustomerNotFoundError:
         raise HTTPException(status_code=404, detail="Customer not found")
     except Exception as e:

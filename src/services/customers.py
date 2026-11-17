@@ -6,9 +6,10 @@ import re
 import unicodedata
 
 from openpyxl import Workbook, load_workbook
+from src.services.clerkAuth import clerk_profiles
 from src.services.settings import get_settings
 from src.services.supabase import supabase
-from src.services.users import ensure_user
+from src.services.users import ensure_user, remember_user_email
 
 TABLE = "customers"
 TEXT_FIELDS = (
@@ -29,6 +30,14 @@ FIELDS = TEXT_FIELDS + INT_FIELDS
 
 class CustomerNotFoundError(LookupError):
     pass
+
+
+class CustomerAccessError(PermissionError):
+    pass
+
+
+SALES_MANAGER_ROLE = "sales_supervisor"
+SALES_REPRESENTATIVE_ROLE = "sales_representative"
 
 
 class CustomerImportError(ValueError):
@@ -200,11 +209,140 @@ def _sort_interactions(items: list | None) -> list[dict]:
     return sorted(rows, key=_interaction_timestamp, reverse=True)
 
 
-def _format_customer(row: dict) -> dict:
+def _format_customer(row: dict, owner_email: str = "") -> dict:
     row["customer_code"] = _text(row.get("customer_code"))
     row["interaction_history"] = _sort_interactions(row.get("interaction_history"))
     row["payment_term_days"] = _nonneg_int(row.get("payment_term_days"))
+    row["owner_email"] = owner_email
     return row
+
+
+def _viewer(clerk_id: str) -> dict:
+    ensure_user(clerk_id)
+    result = (
+        supabase.table("users")
+        .select("clerk_id, role, organization_id, email")
+        .eq("clerk_id", clerk_id)
+        .limit(1)
+        .execute()
+    )
+    rows = result.data or []
+    if not rows:
+        raise RuntimeError("Failed to load user")
+    return rows[0]
+
+
+def _owner_label(row: dict) -> dict:
+    return {
+        "clerk_id": row.get("clerk_id"),
+        "name": _text(row.get("name")),
+        "email": _text(row.get("email")),
+        "role": row.get("role") or SALES_REPRESENTATIVE_ROLE,
+        "is_self": False,
+    }
+
+
+def list_customer_owners(clerk_id: str) -> list[dict]:
+    viewer = _viewer(clerk_id)
+    organization_id = str(viewer.get("organization_id") or "").strip()
+    if viewer.get("role") != SALES_MANAGER_ROLE or not organization_id:
+        return []
+    result = (
+        supabase.table("users")
+        .select("clerk_id, email, role")
+        .eq("organization_id", organization_id)
+        .eq("role", SALES_REPRESENTATIVE_ROLE)
+        .order("email")
+        .execute()
+    )
+    rows = result.data or []
+    profiles = clerk_profiles(
+        [viewer.get("clerk_id"), *[row.get("clerk_id") for row in rows if row.get("clerk_id")]]
+    )
+    owners = []
+    seen = set()
+    self_profile = profiles.get(viewer.get("clerk_id")) or {}
+    viewer["name"] = self_profile.get("name") or ""
+    viewer["email"] = remember_user_email(
+        viewer.get("clerk_id"),
+        viewer.get("email"),
+        self_profile.get("email"),
+    )
+    self_owner = _owner_label(viewer)
+    self_owner["is_self"] = True
+    owners.append(self_owner)
+    seen.add(viewer.get("clerk_id"))
+    for row in rows:
+        if row.get("clerk_id") in seen:
+            continue
+        seen.add(row.get("clerk_id"))
+        profile = profiles.get(row.get("clerk_id")) or {}
+        row["name"] = profile.get("name") or ""
+        row["email"] = remember_user_email(
+            row.get("clerk_id"),
+            row.get("email"),
+            profile.get("email"),
+        )
+        owners.append(_owner_label(row))
+    return owners
+
+
+def visible_owner_ids(clerk_id: str, owner_clerk_id: str | None = None) -> list[str]:
+    return _visible_owner_ids(clerk_id, owner_clerk_id)
+
+
+def owner_email_by_id(owner_ids: list[str]) -> dict[str, str]:
+    return _owner_emails(owner_ids)
+
+
+def _visible_owner_ids(clerk_id: str, owner_clerk_id: str | None = None) -> list[str]:
+    owners = list_customer_owners(clerk_id)
+    if not owners:
+        return [clerk_id]
+    allowed = [str(owner["clerk_id"]) for owner in owners if owner.get("clerk_id")]
+    requested = _text(owner_clerk_id)
+    if not requested:
+        return allowed
+    if requested not in allowed:
+        raise CustomerAccessError("Bạn không xem được dữ liệu của nhân viên này.")
+    return [requested]
+
+
+def _owner_emails(owner_ids: list[str]) -> dict[str, str]:
+    if not owner_ids:
+        return {}
+    result = (
+        supabase.table("users")
+        .select("clerk_id, email")
+        .in_("clerk_id", owner_ids)
+        .execute()
+    )
+    return {
+        row.get("clerk_id"): _text(row.get("email"))
+        for row in (result.data or [])
+    }
+
+
+def _customers_for_owners(owner_ids: list[str]) -> list[dict]:
+    if not owner_ids:
+        return []
+    page_size = 1000
+    start = 0
+    rows: list[dict] = []
+    while True:
+        result = (
+            supabase.table(TABLE)
+            .select("*")
+            .in_("clerk_id", owner_ids)
+            .order("created_at", desc=True)
+            .range(start, start + page_size - 1)
+            .execute()
+        )
+        batch = result.data or []
+        rows.extend(batch)
+        if len(batch) < page_size:
+            return rows
+        start += page_size
 
 
 def _to_row(
@@ -674,13 +812,20 @@ def _customer_export_row(customer: dict) -> list:
     ]
 
 
-def export_customers_xlsx(clerk_id: str) -> bytes:
+def export_customers_xlsx(clerk_id: str, owner_clerk_id: str | None = None) -> bytes:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Khach hang"
-    sheet.append(list(TEMPLATE_HEADERS))
-    for customer in list_customers(clerk_id):
-        sheet.append(_customer_export_row(customer))
+    include_owner = bool(list_customer_owners(clerk_id))
+    headers = list(TEMPLATE_HEADERS)
+    if include_owner:
+        headers.append("Nhân viên")
+    sheet.append(headers)
+    for customer in list_customers(clerk_id, owner_clerk_id):
+        row = _customer_export_row(customer)
+        if include_owner:
+            row.append(_text(customer.get("owner_email")))
+        sheet.append(row)
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
@@ -706,15 +851,30 @@ def create_customer(clerk_id: str, payload: dict) -> dict:
     return _format_customer(result.data[0])
 
 
-def list_customers(clerk_id: str) -> list[dict]:
+def list_customers(clerk_id: str, owner_clerk_id: str | None = None) -> list[dict]:
+    owner_ids = _visible_owner_ids(clerk_id, owner_clerk_id)
+    emails = _owner_emails(owner_ids)
+    return [
+        _format_customer(row, emails.get(row.get("clerk_id"), ""))
+        for row in _customers_for_owners(owner_ids)
+    ]
+
+
+def get_visible_customer(customer_id: str, clerk_id: str) -> dict:
+    owner_ids = _visible_owner_ids(clerk_id)
     result = (
         supabase.table(TABLE)
         .select("*")
-        .eq("clerk_id", clerk_id)
-        .order("created_at", desc=True)
+        .eq("id", customer_id)
+        .in_("clerk_id", owner_ids)
+        .limit(1)
         .execute()
     )
-    return [_format_customer(row) for row in (result.data or [])]
+    data = result.data or []
+    if not data:
+        raise CustomerNotFoundError("Customer not found")
+    emails = _owner_emails([data[0].get("clerk_id")])
+    return _format_customer(data[0], emails.get(data[0].get("clerk_id"), ""))
 
 
 def get_customer(customer_id: str, clerk_id: str) -> dict:

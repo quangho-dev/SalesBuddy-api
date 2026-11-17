@@ -76,6 +76,7 @@ def retrieve_context(
         logger.info("chunks_limited count=%s", len(chunks))
 
         texts, images, tables, citations = build_context_from_retrieved_chunks(chunks)
+        _attach_document_owners(clerk_id, citations)
         logger.info(
             "retrieval_completed texts=%s images=%s tables=%s citations=%s",
             len(texts),
@@ -88,6 +89,20 @@ def retrieve_context(
     except Exception as e:
         logger.error("retrieval_failed error=%s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed in RAG's Retrieval: {str(e)}")
+
+
+def _attach_document_owners(clerk_id: str, citations: list[dict]) -> None:
+    from src.rag.retrieval.utils import get_ready_documents
+    from src.services.documents import owner_display
+
+    if not citations:
+        return
+    by_id = {row["id"]: row for row in get_ready_documents(clerk_id)}
+    for citation in citations:
+        row = by_id.get(citation.get("document_id"))
+        if not row or row.get("is_owner"):
+            continue
+        citation["owner"] = owner_display(row.get("owner_name") or "", row.get("owner_email") or "")
 
 
 def vector_search(user_query, document_ids, rag_settings):

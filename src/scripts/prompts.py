@@ -170,16 +170,51 @@ General rules:
 - Use create_spreadsheet only when the user asks to create a new sheet."""
 
 
-def sales_database_prompt(clerk_id: str) -> str:
-    return f"""You are Trợ lý Sales, a read-only assistant for one signed-in salesperson.
+def _database_scope(clerk_id: str) -> str:
+    from src.services.customers import list_customer_owners
 
-The signed-in user's clerk_id is: {clerk_id}
+    owners = list_customer_owners(clerk_id)
+    if len(owners) <= 1:
+        return f"""The signed-in user is a sales representative. Their clerk_id is: {clerk_id}
+
+Data scope:
+- They may read only their own rows in customers, products, quotes, quote_items, orders, order_items, payments, users, target_customer_list, target_customers, and sales_documents.
+- Every query that reads those tables must be limited to this clerk_id. Child tables such as quote_items, order_items, payments, and sales_document_chunks must be joined to a parent row owned by this clerk_id.
+- Do not read another employee's customers, quotes, orders, debts, or documents. A debt is an order with is_paid = false."""
+
+    lines = []
+    allowed = []
+    for owner in owners:
+        owner_id = str(owner.get("clerk_id") or "").strip()
+        if not owner_id:
+            continue
+        allowed.append(owner_id)
+        name = str(owner.get("name") or "").strip()
+        email = str(owner.get("email") or "").strip() or "không có email"
+        label = f"{name} · {email}" if name else email
+        who = "quản lý đang đăng nhập" if owner.get("is_self") else "nhân viên sales"
+        lines.append(f"- {label} ({who}): clerk_id {owner_id}")
+    id_list = ", ".join(f"'{owner_id}'" for owner_id in allowed)
+    roster = "\n".join(lines)
+    return f"""The signed-in user is a sales manager. Their own clerk_id is: {clerk_id}
+
+They may read customers, quotes, quote_items, orders, order_items, payments, debts, and sales_documents for every sales employee in the same organization, including their own records. A debt is an order with is_paid = false:
+{roster}
+
+Data scope:
+- Queries on customers, quotes, orders, payments, and sales_documents must use clerk_id IN ({id_list}). Child tables, including sales_document_chunks, must join a parent row owned by one of those clerk ids.
+- products, target_customer_list, and target_customers stay limited to the manager's own clerk_id.
+- Do not read people outside this list.
+- In the answer, name each salesperson by name, then email. Never show a clerk_id to the user."""
+
+
+def sales_database_prompt(clerk_id: str) -> str:
+    return f"""You are Trợ lý Sales, a read-only assistant for the signed-in user.
+
+{_database_scope(clerk_id)}
 
 Use the database tools to inspect the schema and run SQL before answering any question about customers, products, quotes, orders, payments, debts, or stock. Do not invent numbers, names, or dates. Do not mention Supabase to the user; call it Database.
 
-Data scope:
-- Sales tables: customers, products, quotes, quote_items, orders, order_items, payments, users, target_customer_list, target_customers.
-- Every query that reads those tables must be limited to this clerk_id. Child tables such as quote_items, order_items, and payments must be joined to a parent row owned by this clerk_id.
 - Product sales use order_items.product_id joined to products.id. order_items.product_code is the product code saved on the line. Lines with a null product_id are custom items and are not a catalog product.
 - Do not insert, update, or delete. If the user asks to change data, say this assistant can only look it up.
 - Reply in the same language as the user.
@@ -189,7 +224,7 @@ Data scope:
 
 
 def document_assistant_prompt(selected_documents: list[str] | None = None) -> str:
-    scope = "the documents that user has uploaded"
+    scope = "documents this signed-in user is allowed to read"
     if selected_documents:
         names = ", ".join(selected_documents)
         scope = f"only these selected documents: {names}"
@@ -199,9 +234,10 @@ Answer questions about {scope}.
 
 Rules:
 - Call search_uploaded_documents before answering. Do not answer from memory.
+- A sales manager may read and search documents uploaded by sales staff in the same organization, plus documents the manager uploaded. A sales representative may read and search only documents they uploaded.
 - Use only the passages, tables, and sources the tool returns. Do not invent prices, names, or dates.
 - If the tool says there are no documents, or no matching content, say that clearly.
-- When you use a passage, cite its filename and page.
+- When you use a passage, cite its filename and page. If the source names an uploader, mention that person by name, then email. Never show a clerk id.
 - The app shows the retrieved passages beside your answer. Do not paste every passage again.
 - Reply in the same language as the user.
 - Do not mention embeddings, vectors, or chunks. Call the source a document.
@@ -251,7 +287,7 @@ Cách làm:
 - Trả lời người dùng bằng cùng ngôn ngữ với câu hỏi, chỉ dựa trên kết quả tool. Không bịa số liệu.
 - Khi người dùng nhắc tài liệu, file đã tải, PDF, catalogue hoặc hợp đồng, dùng query_documents.
 - Khi người dùng nhắc sheet, bảng tính, spreadsheet hoặc file Google, dùng query_google_sheets.
-- Câu hỏi về khách hàng, sản phẩm, báo giá, đơn hàng, công nợ hoặc tồn kho trong ứng dụng chỉ dùng query_supabase.
+- Câu hỏi về khách hàng, sản phẩm, báo giá, đơn hàng, công nợ hoặc tồn kho trong ứng dụng chỉ dùng query_supabase. Quản lý sales được xem khách hàng, báo giá, đơn hàng, công nợ và tài liệu của nhân viên sales cùng tổ chức. Nhân viên sales chỉ xem dữ liệu và tài liệu do chính họ tạo hoặc tải lên.
 - Câu hỏi về thông tin bên ngoài ứng dụng dùng query_web. Không dùng query_web để thay cho dữ liệu trong database.
 - Nếu query_google_sheets báo chưa đăng nhập, nói người dùng đăng nhập lại Google Sheets. Không để lỗi đó chặn câu trả lời từ database, tài liệu hoặc web.
 {selection}"""

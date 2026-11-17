@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from src.services.customers import get_customer
+from src.services.customers import get_customer, owner_email_by_id, visible_owner_ids
 from src.services.orders import create_order, find_order_for_quote, get_order
 from src.services.supabase import supabase
 from src.services.users import ensure_user
@@ -217,17 +217,53 @@ def create_quote(clerk_id: str, payload: dict) -> dict:
     return get_quote(quote_id, clerk_id)
 
 
-def list_quotes(clerk_id: str, customer_id: str | None = None) -> list[dict]:
-    query = (
+def list_quotes(
+    clerk_id: str,
+    customer_id: str | None = None,
+    owner_clerk_id: str | None = None,
+) -> list[dict]:
+    owner_ids = visible_owner_ids(clerk_id, owner_clerk_id)
+    emails = owner_email_by_id(owner_ids)
+    page_size = 1000
+    start = 0
+    rows: list[dict] = []
+    while True:
+        query = (
+            supabase.table(TABLE)
+            .select(SELECT_FIELDS)
+            .in_("clerk_id", owner_ids)
+            .order("created_at", desc=True)
+        )
+        if customer_id:
+            query = query.eq("customer_id", customer_id)
+        result = query.range(start, start + page_size - 1).execute()
+        batch = result.data or []
+        for row in batch:
+            quote = _format_quote(row)
+            quote["owner_email"] = emails.get(row.get("clerk_id"), "")
+            rows.append(quote)
+        if len(batch) < page_size:
+            return rows
+        start += page_size
+
+
+def get_visible_quote(quote_id: str, clerk_id: str) -> dict:
+    owner_ids = visible_owner_ids(clerk_id)
+    result = (
         supabase.table(TABLE)
         .select(SELECT_FIELDS)
-        .eq("clerk_id", clerk_id)
-        .order("created_at", desc=True)
+        .eq("id", quote_id)
+        .in_("clerk_id", owner_ids)
+        .limit(1)
+        .execute()
     )
-    if customer_id:
-        query = query.eq("customer_id", customer_id)
-    result = query.execute()
-    return [_format_quote(row) for row in (result.data or [])]
+    data = result.data or []
+    if not data:
+        raise QuoteNotFoundError("Quote not found")
+    quote = _format_quote(data[0])
+    emails = owner_email_by_id([data[0].get("clerk_id")])
+    quote["owner_email"] = emails.get(data[0].get("clerk_id"), "")
+    return quote
 
 
 def get_quote(quote_id: str, clerk_id: str) -> dict:

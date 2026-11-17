@@ -3,10 +3,13 @@ from pydantic import BaseModel
 from src.services.clerkAuth import get_current_user_clerk_id
 from src.services.organizations import (
     OrganizationInputError,
+    StaffAccessError,
     get_current_user,
     join_organization,
+    list_sales_staff,
 )
 from src.services.supabase import supabase
+from src.services.users import remember_user_email
 
 router = APIRouter(tags=["userRoutes"])
 
@@ -14,6 +17,23 @@ router = APIRouter(tags=["userRoutes"])
 class JoinOrganizationRequest(BaseModel):
     name: str = ""
     tax_code: str = ""
+
+
+def _webhook_email(user_data: dict) -> str:
+    emails = user_data.get("email_addresses") or []
+    primary_id = user_data.get("primary_email_address_id")
+    fallback = ""
+    for item in emails:
+        if not isinstance(item, dict):
+            continue
+        address = str(item.get("email_address") or "").strip().lower()
+        if not address:
+            continue
+        if primary_id and item.get("id") == primary_id:
+            return address
+        if not fallback:
+            fallback = address
+    return fallback
 
 
 @router.get("/me")
@@ -26,6 +46,21 @@ async def read_current_user(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to load user: {str(error)}",
+        )
+
+
+@router.get("/staff")
+async def sales_staff(
+    user_clerk_id: str = Depends(get_current_user_clerk_id),
+):
+    try:
+        return {"staff": list_sales_staff(user_clerk_id)}
+    except StaffAccessError as error:
+        raise HTTPException(status_code=403, detail=str(error))
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to list sales staff: {str(error)}",
         )
 
 
@@ -86,19 +121,27 @@ async def create_user(clerk_webhook_data: dict):
             raise HTTPException(
                 status_code=400, detail="Missing or invalid clerk_id in user data"
             )
+        email = _webhook_email(user_data)
 
         # Check if user already exists to prevent duplicates
         existing_user = (
             supabase.table("users")
-            .select("clerk_id")
+            .select("clerk_id, email")
             .eq("clerk_id", clerk_id)
             .execute()
         )
         if existing_user.data:
+            remember_user_email(
+                clerk_id,
+                existing_user.data[0].get("email"),
+                email,
+            )
             return {"message": "User already exists", "clerk_id": clerk_id}
 
         # Create new user in database
-        result = supabase.table("users").insert({"clerk_id": clerk_id}).execute()
+        result = supabase.table("users").insert(
+            {"clerk_id": clerk_id, "email": email or None}
+        ).execute()
         if not result.data:
             raise HTTPException(
                 status_code=500, detail="Failed to create user in database"

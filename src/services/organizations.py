@@ -1,7 +1,9 @@
 from datetime import datetime, timezone
 import re
 
+from src.services.clerkAuth import clerk_profiles
 from src.services.supabase import supabase
+from src.services.users import remember_user_email
 
 USERS_TABLE = "users"
 TABLE = "organizations"
@@ -10,6 +12,14 @@ _SPACE = re.compile(r"\s+")
 
 class OrganizationInputError(ValueError):
     pass
+
+
+class StaffAccessError(PermissionError):
+    pass
+
+
+SALES_MANAGER_ROLE = "sales_supervisor"
+SALES_REPRESENTATIVE_ROLE = "sales_representative"
 
 
 def _now() -> str:
@@ -161,8 +171,75 @@ def _match_organization(name: str, tax_code: str) -> dict | None:
     return None
 
 
+def _customer_counts(owner_ids: list[str]) -> dict[str, int]:
+    if not owner_ids:
+        return {}
+    counts = {owner_id: 0 for owner_id in owner_ids}
+    page_size = 1000
+    start = 0
+    while True:
+        result = (
+            supabase.table("customers")
+            .select("clerk_id")
+            .in_("clerk_id", owner_ids)
+            .order("id")
+            .range(start, start + page_size - 1)
+            .execute()
+        )
+        batch = result.data or []
+        for row in batch:
+            owner_id = row.get("clerk_id")
+            if owner_id in counts:
+                counts[owner_id] += 1
+        if len(batch) < page_size:
+            return counts
+        start += page_size
+
+
+def list_sales_staff(clerk_id: str) -> list[dict]:
+    viewer = (
+        supabase.table(USERS_TABLE)
+        .select("clerk_id, role, organization_id")
+        .eq("clerk_id", clerk_id)
+        .limit(1)
+        .execute()
+    )
+    rows = viewer.data or []
+    user = rows[0] if rows else _ensure_user(clerk_id)
+    organization_id = str(user.get("organization_id") or "").strip()
+    if user.get("role") != SALES_MANAGER_ROLE or not organization_id:
+        raise StaffAccessError("Chỉ quản lý sales mới xem được danh sách nhân viên.")
+    result = (
+        supabase.table(USERS_TABLE)
+        .select("clerk_id, email, role")
+        .eq("organization_id", organization_id)
+        .eq("role", SALES_REPRESENTATIVE_ROLE)
+        .order("email")
+        .execute()
+    )
+    staff = result.data or []
+    owner_ids = [row.get("clerk_id") for row in staff if row.get("clerk_id")]
+    counts = _customer_counts(owner_ids)
+    profiles = clerk_profiles(owner_ids)
+    listed = []
+    for row in staff:
+        owner_id = row.get("clerk_id")
+        profile = profiles.get(owner_id) or {}
+        listed.append(
+            {
+                "clerk_id": owner_id,
+                "name": str(profile.get("name") or "").strip(),
+                "email": remember_user_email(owner_id, row.get("email"), profile.get("email")),
+                "role": row.get("role") or SALES_REPRESENTATIVE_ROLE,
+                "customer_count": counts.get(owner_id, 0),
+            }
+        )
+    return listed
+
+
 def get_current_user(clerk_id: str) -> dict:
     user = _ensure_user(clerk_id)
+    remember_user_email(clerk_id)
     organization_id = str(user.get("organization_id") or "").strip()
     organization = _organization_by_id(organization_id) if organization_id else None
     return _format_user(user, organization)

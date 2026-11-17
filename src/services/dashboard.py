@@ -3,6 +3,7 @@ from zoneinfo import ZoneInfo
 import re
 
 from src.services.orders import VAT_RATE
+from src.services.organizations import StaffAccessError, list_sales_staff
 from src.services.supabase import supabase
 
 VN = ZoneInfo("Asia/Ho_Chi_Minh")
@@ -14,6 +15,10 @@ ORDER_SELECT = (
     "id, customer_id, order_date, is_paid, paid_amount, "
     "customers(id, customer_code, company_name, contact_person), "
     "order_items(product_id, product_code, product_name, unit, quantity, selling_price, vat_invoice)"
+)
+STAFF_ORDER_SELECT = (
+    "id, clerk_id, order_date, "
+    "order_items(quantity, selling_price, vat_invoice)"
 )
 
 
@@ -146,7 +151,10 @@ def get_dashboard(clerk_id: str, period: str = "month", limit: int = 5) -> dict:
     orders = _fetch_orders(clerk_id, coverage_start, coverage_end)
     customers = _fetch_customers(clerk_id, coverage_start, coverage_end)
     unpaid = _fetch_unpaid_orders(clerk_id)
-    return build_dashboard(orders, customers, unpaid, period, limit)
+    payload = build_dashboard(orders, customers, unpaid, period, limit)
+    selected_start, selected_end = windows[period]
+    payload["staff_ranking"] = _staff_ranking(clerk_id, selected_start, selected_end)
+    return payload
 
 
 def _add_months(moment: datetime, months: int) -> datetime:
@@ -371,6 +379,62 @@ def _fetch_unpaid_orders(clerk_id: str) -> list[dict]:
             .select(ORDER_SELECT)
             .eq("clerk_id", clerk_id)
             .eq("is_paid", False)
+            .order("id")
+        )
+
+    return _fetch_all(query)
+
+
+def _staff_ranking(clerk_id: str, start: datetime, end: datetime) -> list[dict] | None:
+    try:
+        staff = list_sales_staff(clerk_id)
+    except StaffAccessError:
+        return None
+    totals = {
+        row.get("clerk_id"): {"revenue": 0, "order_count": 0}
+        for row in staff
+        if row.get("clerk_id")
+    }
+    for order in _fetch_staff_orders(list(totals), start, end):
+        moment = _parse_timestamp(order.get("order_date"))
+        owner_id = order.get("clerk_id")
+        if moment is None or owner_id not in totals or not (start <= moment < end):
+            continue
+        totals[owner_id]["revenue"] += _order_revenue(order)
+        totals[owner_id]["order_count"] += 1
+    ranked = sorted(
+        staff,
+        key=lambda row: (
+            -totals.get(row.get("clerk_id"), {}).get("revenue", 0),
+            -totals.get(row.get("clerk_id"), {}).get("order_count", 0),
+            _text(row.get("email")).casefold(),
+            row.get("clerk_id") or "",
+        ),
+    )
+    return [
+        {
+            "name": _text(row.get("name")),
+            "email": _text(row.get("email")),
+            "revenue": totals.get(row.get("clerk_id"), {}).get("revenue", 0),
+            "order_count": totals.get(row.get("clerk_id"), {}).get("order_count", 0),
+        }
+        for row in ranked
+    ]
+
+
+def _fetch_staff_orders(owner_ids: list[str], start: datetime, end: datetime) -> list[dict]:
+    if not owner_ids:
+        return []
+    start_iso = start.astimezone(timezone.utc).isoformat()
+    end_iso = end.astimezone(timezone.utc).isoformat()
+
+    def query():
+        return (
+            supabase.table("orders")
+            .select(STAFF_ORDER_SELECT)
+            .in_("clerk_id", owner_ids)
+            .gte("order_date", start_iso)
+            .lt("order_date", end_iso)
             .order("id")
         )
 
