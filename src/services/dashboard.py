@@ -3,7 +3,7 @@ from zoneinfo import ZoneInfo
 import re
 
 from src.services.orders import VAT_RATE
-from src.services.organizations import StaffAccessError, list_sales_staff
+from src.services.organizations import SALES_MANAGER_ROLE, StaffAccessError, list_sales_staff
 from src.services.supabase import supabase
 
 VN = ZoneInfo("Asia/Ho_Chi_Minh")
@@ -154,6 +154,9 @@ def get_dashboard(clerk_id: str, period: str = "month", limit: int = 5) -> dict:
     payload = build_dashboard(orders, customers, unpaid, period, limit)
     selected_start, selected_end = windows[period]
     payload["staff_ranking"] = _staff_ranking(clerk_id, selected_start, selected_end)
+    payload["organization_rankings"] = _organization_rankings(
+        clerk_id, selected_start, selected_end, limit
+    )
     return payload
 
 
@@ -423,6 +426,173 @@ def _staff_ranking(clerk_id: str, start: datetime, end: datetime) -> list[dict] 
 
 
 def _fetch_staff_orders(owner_ids: list[str], start: datetime, end: datetime) -> list[dict]:
+    return _fetch_owner_orders(owner_ids, start, end, STAFF_ORDER_SELECT)
+
+
+ORG_ORDER_SELECT = (
+    "id, customer_id, order_date, "
+    "customers(id, customer_code, company_name, contact_person, tax_code), "
+    "order_items(product_id, product_code, product_name, unit, quantity, selling_price, vat_invoice)"
+)
+
+
+def _organization_rankings(
+    clerk_id: str, start: datetime, end: datetime, limit: int
+) -> dict | None:
+    organization_id = _manager_organization_id(clerk_id)
+    if not organization_id:
+        return None
+    orders = _fetch_owner_orders(
+        _organization_member_ids(organization_id),
+        start,
+        end,
+        ORG_ORDER_SELECT,
+    )
+    customers_by_key: dict[str, dict] = {}
+    products_by_key: dict[tuple, dict] = {}
+    for order in orders:
+        moment = _parse_timestamp(order.get("order_date"))
+        if moment is None or not (start <= moment < end):
+            continue
+        _add_organization_customer(customers_by_key, order, _order_revenue(order))
+        _add_organization_products(products_by_key, order)
+    customers = sorted(
+        customers_by_key.values(),
+        key=lambda row: (
+            -row["revenue"],
+            -row["order_count"],
+            row["company_name"].casefold(),
+            row["customer_id"],
+        ),
+    )[:limit]
+    products = sorted(
+        products_by_key.values(),
+        key=lambda row: (
+            -row["revenue"],
+            -row["quantity"],
+            row["product_name"].casefold(),
+            row["product_code"].casefold(),
+        ),
+    )[:limit]
+    return {
+        "customers": [_public_customer(row) for row in customers],
+        "products": [_public_product(row) for row in products],
+    }
+
+
+def _manager_organization_id(clerk_id: str) -> str | None:
+    result = (
+        supabase.table("users")
+        .select("role, organization_id")
+        .eq("clerk_id", clerk_id)
+        .limit(1)
+        .execute()
+    )
+    rows = result.data or []
+    if not rows:
+        return None
+    organization_id = str(rows[0].get("organization_id") or "").strip()
+    if rows[0].get("role") != SALES_MANAGER_ROLE or not organization_id:
+        return None
+    return organization_id
+
+
+def _organization_member_ids(organization_id: str) -> list[str]:
+    result = (
+        supabase.table("users")
+        .select("clerk_id")
+        .eq("organization_id", organization_id)
+        .execute()
+    )
+    owner_ids: list[str] = []
+    seen: set[str] = set()
+    for row in result.data or []:
+        owner_id = str(row.get("clerk_id") or "").strip()
+        if owner_id and owner_id not in seen:
+            seen.add(owner_id)
+            owner_ids.append(owner_id)
+    return owner_ids
+
+
+def _organization_customer_key(order: dict) -> str:
+    customer_id = _text(order.get("customer_id"))
+    customer = _customer_row(order)
+    tax_code = re.sub(r"\s+", "", _text(customer.get("tax_code"))).upper()
+    if tax_code:
+        return f"tax:{tax_code}"
+    company_name = _fold(customer.get("company_name"))
+    if company_name:
+        return f"name:{company_name}"
+    return f"id:{customer_id}"
+
+
+def _add_organization_customer(groups: dict[str, dict], order: dict, total: int) -> None:
+    customer_id = _text(order.get("customer_id"))
+    if not customer_id:
+        return
+    key = _organization_customer_key(order)
+    customer = _customer_row(order)
+    current = groups.get(key)
+    if current is None:
+        groups[key] = {
+            "customer_id": customer_id,
+            "customer_code": _text(customer.get("customer_code")),
+            "company_name": _text(customer.get("company_name")),
+            "contact_person": _text(customer.get("contact_person")),
+            "revenue": total,
+            "order_count": 1,
+        }
+        return
+    current["revenue"] += total
+    current["order_count"] += 1
+    if not current["company_name"]:
+        current["company_name"] = _text(customer.get("company_name"))
+    if not current["contact_person"]:
+        current["contact_person"] = _text(customer.get("contact_person"))
+    if not current["customer_code"]:
+        current["customer_code"] = _text(customer.get("customer_code"))
+
+
+def _organization_product_key(item: dict) -> tuple:
+    product_code = _fold(item.get("product_code"))
+    if product_code:
+        return ("code", product_code)
+    return ("custom", _fold(item.get("product_name")), _fold(item.get("unit")))
+
+
+def _add_organization_products(groups: dict[tuple, dict], order: dict) -> None:
+    order_id = _text(order.get("id"))
+    for item in _order_items(order):
+        key = _organization_product_key(item)
+        quantity = float(item.get("quantity") or 0)
+        revenue = _line_revenue(item)
+        current = groups.get(key)
+        if current is None:
+            current = {
+                "product_id": _text(item.get("product_id")) or None,
+                "product_code": _text(item.get("product_code")),
+                "product_name": _text(item.get("product_name")),
+                "unit": _text(item.get("unit")),
+                "quantity": 0.0,
+                "revenue": 0,
+                "order_ids": set(),
+                "_label_quantity": -1.0,
+            }
+            groups[key] = current
+        current["quantity"] += quantity
+        current["revenue"] += revenue
+        if order_id:
+            current["order_ids"].add(order_id)
+        if quantity > current["_label_quantity"]:
+            current["_label_quantity"] = quantity
+            current["product_code"] = _text(item.get("product_code"))
+            current["product_name"] = _text(item.get("product_name"))
+            current["unit"] = _text(item.get("unit"))
+
+
+def _fetch_owner_orders(
+    owner_ids: list[str], start: datetime, end: datetime, select: str
+) -> list[dict]:
     if not owner_ids:
         return []
     start_iso = start.astimezone(timezone.utc).isoformat()
@@ -431,7 +601,7 @@ def _fetch_staff_orders(owner_ids: list[str], start: datetime, end: datetime) ->
     def query():
         return (
             supabase.table("orders")
-            .select(STAFF_ORDER_SELECT)
+            .select(select)
             .in_("clerk_id", owner_ids)
             .gte("order_date", start_iso)
             .lt("order_date", end_iso)
