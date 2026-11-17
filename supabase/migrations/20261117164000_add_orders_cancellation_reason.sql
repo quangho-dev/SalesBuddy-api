@@ -1,0 +1,2 @@
+ALTER TABLE orders
+    ADD COLUMN IF NOT EXISTS cancellation_reason TEXT NOT NULL DEFAULT '';

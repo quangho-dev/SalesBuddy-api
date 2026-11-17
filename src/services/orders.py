@@ -13,9 +13,15 @@ from src.services.users import ensure_user
 
 TABLE = "orders"
 ITEMS_TABLE = "order_items"
+EVENTS_TABLE = "order_status_events"
+ORDER_STATUSES = ("official", "cancelled", "paused")
+EVENT_FIELDS = "id, previous_status, status, reason, created_at"
 VAT_RATE = 0.1
 CUSTOMER_EMBED = "id, company_name, contact_person, phone_number, address, tax_code, payment_term_days"
-SELECT_FIELDS = f"*, customers({CUSTOMER_EMBED}), order_items(*)"
+SELECT_FIELDS = (
+    f"*, customers({CUSTOMER_EMBED}), order_items(*), "
+    f"order_status_events({EVENT_FIELDS})"
+)
 _ORDER_CODE = re.compile(r"^DH-(\d+)$", re.IGNORECASE)
 ITEM_FIELDS = (
     "id",
@@ -177,16 +183,34 @@ def _normalize_items(items, clerk_id: str) -> list[dict]:
     return normalized
 
 
+def _order_status(value, default: str = "official") -> str:
+    status = _text(value)
+    if status in ORDER_STATUSES:
+        return status
+    if not status:
+        return default
+    raise ValueError("Trạng thái đơn hàng không hợp lệ.")
+
+
+def _cancellation_reason(status: str, value) -> str:
+    if status != "cancelled":
+        return ""
+    return _text(value)[:1000]
+
+
 def _to_order_row(payload: dict, clerk_id: str) -> dict:
     customer_id = str(payload.get("customer_id") or "").strip()
     if not customer_id:
         raise ValueError("customer_id is required")
     _owned_customer(customer_id, clerk_id)
+    status = _order_status(payload.get("status"))
     row = {
         "clerk_id": clerk_id,
         "customer_id": customer_id,
         "order_date": _order_timestamp(payload.get("order_date")),
         "notes": _text(payload.get("notes")),
+        "status": status,
+        "cancellation_reason": _cancellation_reason(status, payload.get("cancellation_reason")),
         "is_paid": _bool(payload.get("is_paid")),
         "is_delivered": _bool(payload.get("is_delivered")),
         "delivered_at": _timestamp(payload.get("delivered_at")),
@@ -199,13 +223,53 @@ def _to_order_row(payload: dict, clerk_id: str) -> dict:
     return row
 
 
+def _format_status_event(event: dict) -> dict:
+    status = _order_status(event.get("status"))
+    previous = _text(event.get("previous_status"))
+    if previous not in ORDER_STATUSES:
+        previous = ""
+    return {
+        "id": event.get("id"),
+        "previous_status": previous,
+        "status": status,
+        "reason": _cancellation_reason(status, event.get("reason")),
+        "created_at": event.get("created_at"),
+    }
+
+
+def _record_status_event(
+    clerk_id: str,
+    order_id: str,
+    previous_status: str,
+    status: str,
+    reason: str,
+) -> None:
+    supabase.table(EVENTS_TABLE).insert(
+        {
+            "clerk_id": clerk_id,
+            "order_id": order_id,
+            "previous_status": previous_status if previous_status in ORDER_STATUSES else "",
+            "status": status,
+            "reason": _cancellation_reason(status, reason),
+        }
+    ).execute()
+
+
 def _format_order(row: dict) -> dict:
     items = row.pop("order_items", None) or []
     items = sorted(items, key=lambda item: item.get("sort_order") or 0)
     row["items"] = [
         {field: item.get(field) for field in ITEM_FIELDS} for item in items
     ]
+    events = row.pop("order_status_events", None) or []
+    row["status_events"] = sorted(
+        (_format_status_event(event) for event in events if isinstance(event, dict)),
+        key=lambda event: event.get("created_at") or "",
+        reverse=True,
+    )
     row["order_code"] = _text(row.get("order_code"))
+    row["status"] = _order_status(row.get("status"))
+    row["cancellation_reason"] = _cancellation_reason(row["status"], row.get("cancellation_reason"))
     row["order_date"] = _order_timestamp(row.get("order_date"))
     row["is_paid"] = _bool(row.get("is_paid"))
     row["is_delivered"] = _bool(row.get("is_delivered"))
@@ -433,6 +497,13 @@ def create_order(clerk_id: str, payload: dict) -> dict:
             _insert_payment(clerk_id, order_id, payment)
         if _bool(payload.get("is_delivered")):
             _sync_delivery_stock(clerk_id, [], items)
+        _record_status_event(
+            clerk_id,
+            order_id,
+            "",
+            row["status"],
+            row.get("cancellation_reason") or "",
+        )
     except Exception:
         supabase.table("payments").delete().eq("order_id", order_id).execute()
         supabase.table(TABLE).delete().eq("id", order_id).eq(
@@ -470,8 +541,16 @@ def list_orders(
         start += page_size
 
 
+_ORDER_STATUS_LABELS = {
+    "official": "Chính thức",
+    "cancelled": "Đã huỷ",
+    "paused": "Tạm dừng",
+}
+
 _ORDER_EXPORT_HEADERS = (
     "Mã đơn",
+    "Trạng thái",
+    "Lý do huỷ",
     "Ngày đơn",
     "Khách hàng",
     "Người liên hệ",
@@ -561,6 +640,8 @@ def _order_export_row(order: dict) -> list:
     products = ", ".join(label for label in (_export_item_label(item) for item in items) if label)
     return [
         _text(order.get("order_code")),
+        _ORDER_STATUS_LABELS.get(_order_status(order.get("status")), "Chính thức"),
+        _text(order.get("cancellation_reason")),
         _local_moment(order.get("order_date")),
         _customer_field(order, "company_name") or _customer_field(order, "contact_person"),
         _customer_field(order, "contact_person"),
@@ -594,7 +675,7 @@ def export_orders_xlsx(clerk_id: str) -> bytes:
         sheet.append(_order_export_row(order))
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = sheet.dimensions
-    widths = (14, 18, 28, 22, 16, 36, 16, 18, 22, 14, 14, 16, 18, 10, 14, 48, 14, 14, 14, 28)
+    widths = (14, 14, 28, 18, 28, 22, 16, 36, 16, 18, 22, 14, 14, 16, 18, 10, 14, 48, 14, 14, 14, 28)
     for index, width in enumerate(widths, start=1):
         column = sheet.cell(row=1, column=index).column_letter
         sheet.column_dimensions[column].width = width
@@ -624,6 +705,17 @@ def update_order(order_id: str, clerk_id: str, payload: dict) -> dict:
         updates["order_date"] = _order_timestamp(payload["order_date"])
     if "notes" in payload and payload["notes"] is not None:
         updates["notes"] = _text(payload["notes"])
+    if "status" in payload and payload["status"] is not None:
+        updates["status"] = _order_status(payload["status"])
+    if ("status" in updates) or ("cancellation_reason" in payload):
+        next_status = updates.get("status") or _order_status(existing.get("status"))
+        reason = (
+            payload.get("cancellation_reason")
+            if "cancellation_reason" in payload
+            else existing.get("cancellation_reason")
+        )
+        updates["status"] = next_status
+        updates["cancellation_reason"] = _cancellation_reason(next_status, reason)
     if "is_paid" in payload and payload["is_paid"] is not None:
         updates["is_paid"] = _bool(payload["is_paid"])
     if "is_delivered" in payload and payload["is_delivered"] is not None:
@@ -707,6 +799,12 @@ def update_order(order_id: str, clerk_id: str, payload: dict) -> dict:
         if items is not None and previous_items:
             _replace_items(order_id, _normalize_items(previous_items, clerk_id))
         raise
+    previous_status = _order_status(existing.get("status"))
+    previous_reason = _text(existing.get("cancellation_reason"))
+    next_status = updates.get("status", previous_status)
+    next_reason = updates.get("cancellation_reason", previous_reason)
+    if next_status != previous_status or next_reason != previous_reason:
+        _record_status_event(clerk_id, order_id, previous_status, next_status, next_reason)
     return get_order(order_id, clerk_id)
 
 

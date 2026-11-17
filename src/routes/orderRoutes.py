@@ -22,6 +22,7 @@ from src.services.orders import (
 router = APIRouter(tags=["orderRoutes"])
 
 PaymentMethod = Literal["cash", "bank_transfer"]
+OrderStatus = Literal["official", "cancelled", "paused"]
 
 
 class OrderItemInput(BaseModel):
@@ -46,6 +47,8 @@ class CreateOrderRequest(BaseModel):
     customer_id: UUID
     order_date: datetime | date | None = None
     notes: str = ""
+    status: OrderStatus = "official"
+    cancellation_reason: str = ""
     is_paid: bool = False
     is_delivered: bool = False
     delivered_at: datetime | None = None
@@ -58,6 +61,8 @@ class UpdateOrderRequest(BaseModel):
     customer_id: UUID | None = None
     order_date: datetime | date | None = None
     notes: str | None = None
+    status: OrderStatus | None = None
+    cancellation_reason: str | None = None
     is_paid: bool | None = None
     is_delivered: bool | None = None
     delivered_at: datetime | None = None
