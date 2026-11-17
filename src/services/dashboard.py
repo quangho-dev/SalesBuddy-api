@@ -11,7 +11,7 @@ BUCKETS = {"day": "hour", "week": "day", "month": "day", "year": "month"}
 PAGE_SIZE = 1000
 
 ORDER_SELECT = (
-    "id, customer_id, order_date, is_paid, paid_amount, "
+    "id, customer_id, order_date, status, is_paid, paid_amount, "
     "customers(id, customer_code, company_name, contact_person), "
     "order_items(product_id, product_code, product_name, unit, quantity, selling_price, vat_invoice)"
 )
@@ -72,8 +72,9 @@ def build_dashboard(
         if point is not None:
             point["revenue"] += total
             point["order_count"] += 1
-        _add_customer(customers_by_id, order, total)
-        _add_products(products_by_key, order)
+        if _official_order(order):
+            _add_customer(customers_by_id, order, total)
+            _add_products(products_by_key, order)
 
     new_customer_count = {name: 0 for name in PERIODS}
     for customer in customers:
@@ -107,8 +108,8 @@ def build_dashboard(
     top_products = sorted(
         products_by_key.values(),
         key=lambda row: (
-            -row["quantity"],
             -row["revenue"],
+            -row["quantity"],
             row["product_name"].casefold(),
             row["product_code"].casefold(),
         ),
@@ -266,6 +267,11 @@ def _add_customer(groups: dict[str, dict], order: dict, total: int) -> None:
 
 def _fold(value) -> str:
     return re.sub(r"\s+", " ", _text(value)).casefold()
+
+
+def _official_order(order: dict) -> bool:
+    status = _text(order.get("status"))
+    return status in ("", "official")
 
 
 def _product_key(item: dict) -> tuple:
