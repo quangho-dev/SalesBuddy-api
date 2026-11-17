@@ -147,6 +147,9 @@ def _stored_citations(citations: list | None) -> list[dict]:
         page = item.get("page")
         if page not in (None, "", "Unknown"):
             stored["page"] = page
+        owner = str(item.get("owner") or "").strip()
+        if owner:
+            stored["owner"] = owner
         items.append(stored)
     return items
 

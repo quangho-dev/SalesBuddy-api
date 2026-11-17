@@ -7,14 +7,14 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
 from src.agents.order_file_agent import generate_order_file
 from src.services.clerkAuth import get_current_user_clerk_id
-from src.services.customers import CustomerNotFoundError
+from src.services.customers import CustomerAccessError, CustomerNotFoundError
 from src.services.googleDrive import QuoteTemplateNotFoundError
 from src.services.orders import (
     OrderNotFoundError,
     create_order,
     delete_order,
     export_orders_xlsx,
-    get_order,
+    get_visible_order,
     list_orders,
     update_order,
 )
@@ -94,6 +94,7 @@ class GenerateOrderFileRequest(BaseModel):
 async def list_all_orders(
     customer_id: UUID | None = Query(default=None),
     is_paid: bool | None = Query(default=None),
+    owner_clerk_id: str | None = Query(default=None),
     user_clerk_id: str = Depends(get_current_user_clerk_id),
 ):
     try:
@@ -101,7 +102,10 @@ async def list_all_orders(
             user_clerk_id,
             customer_id=str(customer_id) if customer_id else None,
             is_paid=is_paid,
+            owner_clerk_id=owner_clerk_id,
         )
+    except CustomerAccessError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -111,10 +115,13 @@ async def list_all_orders(
 
 @router.get("/export")
 async def export_orders(
+    owner_clerk_id: str | None = Query(default=None),
     user_clerk_id: str = Depends(get_current_user_clerk_id),
 ):
     try:
-        content = export_orders_xlsx(user_clerk_id)
+        content = export_orders_xlsx(user_clerk_id, owner_clerk_id)
+    except CustomerAccessError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -159,7 +166,7 @@ async def get_order_detail(
     user_clerk_id: str = Depends(get_current_user_clerk_id),
 ):
     try:
-        return get_order(str(order_id), user_clerk_id)
+        return get_visible_order(str(order_id), user_clerk_id)
     except OrderNotFoundError:
         raise HTTPException(status_code=404, detail="Order not found")
     except Exception as e:

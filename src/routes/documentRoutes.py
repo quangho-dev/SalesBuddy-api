@@ -8,7 +8,7 @@ from src.services.documents import (
     DocumentNotFoundError,
     create_document,
     delete_document,
-    get_document,
+    get_visible_document,
     list_documents,
     reembed_document,
 )
@@ -98,7 +98,7 @@ async def read_document(
     user_clerk_id: str = Depends(get_current_user_clerk_id),
 ):
     try:
-        return get_document(user_clerk_id, document_id)
+        return get_visible_document(user_clerk_id, document_id)
     except DocumentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:

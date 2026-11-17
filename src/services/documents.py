@@ -5,6 +5,7 @@ from pathlib import Path
 
 from src.config.index import appConfig
 from src.services.awsS3 import s3_client
+from src.services.customers import list_customer_owners
 from src.services.supabase import supabase
 from src.services.users import ensure_user
 
@@ -51,7 +52,41 @@ def _safe_filename(filename: str) -> str:
     return name[:180]
 
 
-def _public_document(row: dict) -> dict:
+def document_owner_scope(clerk_id: str) -> tuple[list[str], dict[str, dict]]:
+    """Clerk ids whose documents this user may read, plus display labels.
+
+    A sales manager reads their own documents and those uploaded by sales staff
+    in the same organization. A sales representative reads only their own.
+    """
+    owners = list_customer_owners(clerk_id)
+    if not owners:
+        return [clerk_id], {}
+    labels: dict[str, dict] = {}
+    owner_ids: list[str] = []
+    for owner in owners:
+        owner_id = str(owner.get("clerk_id") or "").strip()
+        if not owner_id or owner_id in labels:
+            continue
+        labels[owner_id] = {
+            "name": str(owner.get("name") or "").strip(),
+            "email": str(owner.get("email") or "").strip(),
+            "is_self": bool(owner.get("is_self")),
+        }
+        owner_ids.append(owner_id)
+    return owner_ids or [clerk_id], labels
+
+
+def owner_display(name: str, email: str) -> str:
+    clean_name = str(name or "").strip()
+    clean_email = str(email or "").strip()
+    if clean_name and clean_email:
+        return f"{clean_name} · {clean_email}"
+    return clean_name or clean_email or "Nhân viên chưa có email"
+
+
+def _public_document(row: dict, viewer_id: str = "", labels: dict | None = None) -> dict:
+    owner_id = str(row.get("clerk_id") or "")
+    label = (labels or {}).get(owner_id) or {}
     return {
         "id": row["id"],
         "filename": row["filename"],
@@ -62,6 +97,9 @@ def _public_document(row: dict) -> dict:
         "processing_status": row.get("processing_status"),
         "error": row.get("error"),
         "chunk_count": row.get("chunk_count") or 0,
+        "owner_name": str(label.get("name") or "").strip(),
+        "owner_email": str(label.get("email") or "").strip(),
+        "is_owner": owner_id == viewer_id if viewer_id else True,
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -97,16 +135,17 @@ def get_document(clerk_id: str, document_id: str) -> dict:
 
 def list_documents(clerk_id: str) -> list[dict]:
     ensure_user(clerk_id)
+    owner_ids, labels = document_owner_scope(clerk_id)
     result = (
         supabase.table(DOCUMENTS)
         .select(
-            "id, filename, content_type, byte_size, status, source_type, processing_status, error, chunk_count, created_at, updated_at"
+            "id, clerk_id, filename, content_type, byte_size, status, source_type, processing_status, error, chunk_count, created_at, updated_at"
         )
-        .eq("clerk_id", clerk_id)
+        .in_("clerk_id", owner_ids)
         .order("created_at", desc=True)
         .execute()
     )
-    return [_public_document(row) for row in result.data or []]
+    return [_public_document(row, clerk_id, labels) for row in result.data or []]
 
 
 def set_document_status(
@@ -187,7 +226,7 @@ def create_document(clerk_id: str, filename: str, data: bytes) -> dict:
         set_document_status(document["id"], "failed", error=str(exc))
         document["status"] = "failed"
         document["error"] = str(exc)
-    return _public_document(document)
+    return _public_document(document, clerk_id)
 
 
 def reembed_document(clerk_id: str, document_id: str) -> dict:
@@ -207,6 +246,23 @@ def reembed_document(clerk_id: str, document_id: str) -> dict:
         set_document_status(document_id, "failed", error=str(exc))
         raise
     return get_document(clerk_id, document_id)
+
+
+def get_visible_document(clerk_id: str, document_id: str) -> dict:
+    document_id = _parse_document_id(document_id)
+    owner_ids, labels = document_owner_scope(clerk_id)
+    result = (
+        supabase.table(DOCUMENTS)
+        .select("*")
+        .eq("id", document_id)
+        .in_("clerk_id", owner_ids)
+        .limit(1)
+        .execute()
+    )
+    rows = result.data or []
+    if not rows:
+        raise DocumentNotFoundError("Document not found.")
+    return _public_document(rows[0], clerk_id, labels)
 
 
 def delete_document(clerk_id: str, document_id: str) -> None:

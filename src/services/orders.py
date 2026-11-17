@@ -7,7 +7,13 @@ import re
 from openpyxl import Workbook
 from openpyxl.styles import Font
 
-from src.services.customers import CustomerNotFoundError, get_customer
+from src.services.customers import (
+    CustomerNotFoundError,
+    get_customer,
+    list_customer_owners,
+    owner_email_by_id,
+    visible_owner_ids,
+)
 from src.services.supabase import supabase
 from src.services.users import ensure_user
 
@@ -517,7 +523,10 @@ def list_orders(
     clerk_id: str,
     customer_id: str | None = None,
     is_paid: bool | None = None,
+    owner_clerk_id: str | None = None,
 ) -> list[dict]:
+    owner_ids = visible_owner_ids(clerk_id, owner_clerk_id)
+    emails = owner_email_by_id(owner_ids)
     page_size = 1000
     start = 0
     rows: list[dict] = []
@@ -525,7 +534,7 @@ def list_orders(
         query = (
             supabase.table(TABLE)
             .select(SELECT_FIELDS)
-            .eq("clerk_id", clerk_id)
+            .in_("clerk_id", owner_ids)
             .order("order_date", desc=True)
             .order("created_at", desc=True)
         )
@@ -535,7 +544,10 @@ def list_orders(
             query = query.eq("is_paid", is_paid)
         result = query.range(start, start + page_size - 1).execute()
         batch = result.data or []
-        rows.extend(_format_order(row) for row in batch)
+        for row in batch:
+            order = _format_order(row)
+            order["owner_email"] = emails.get(row.get("clerk_id"), "")
+            rows.append(order)
         if len(batch) < page_size:
             return rows
         start += page_size
@@ -664,15 +676,22 @@ def _order_export_row(order: dict) -> list:
     ]
 
 
-def export_orders_xlsx(clerk_id: str) -> bytes:
+def export_orders_xlsx(clerk_id: str, owner_clerk_id: str | None = None) -> bytes:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Don hang"
-    sheet.append(list(_ORDER_EXPORT_HEADERS))
+    include_owner = bool(list_customer_owners(clerk_id))
+    headers = list(_ORDER_EXPORT_HEADERS)
+    if include_owner:
+        headers.append("Nhân viên")
+    sheet.append(headers)
     for cell in sheet[1]:
         cell.font = Font(bold=True)
-    for order in list_orders(clerk_id):
-        sheet.append(_order_export_row(order))
+    for order in list_orders(clerk_id, owner_clerk_id=owner_clerk_id):
+        row = _order_export_row(order)
+        if include_owner:
+            row.append(_text(order.get("owner_email")))
+        sheet.append(row)
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = sheet.dimensions
     widths = (14, 14, 28, 18, 28, 22, 16, 36, 16, 18, 22, 14, 14, 16, 18, 10, 14, 48, 14, 14, 14, 28)
@@ -682,6 +701,25 @@ def export_orders_xlsx(clerk_id: str) -> bytes:
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
+
+
+def get_visible_order(order_id: str, clerk_id: str) -> dict:
+    owner_ids = visible_owner_ids(clerk_id)
+    result = (
+        supabase.table(TABLE)
+        .select(SELECT_FIELDS)
+        .eq("id", order_id)
+        .in_("clerk_id", owner_ids)
+        .limit(1)
+        .execute()
+    )
+    data = result.data or []
+    if not data:
+        raise OrderNotFoundError("Order not found")
+    order = _format_order(data[0])
+    emails = owner_email_by_id([data[0].get("clerk_id")])
+    order["owner_email"] = emails.get(data[0].get("clerk_id"), "")
+    return order
 
 
 def get_order(order_id: str, clerk_id: str) -> dict:

@@ -170,7 +170,9 @@ def _format_document_context(texts: list, tables: list, citations: list) -> str:
         filename = citation.get("filename") or "Tài liệu"
         page = citation.get("page")
         page_label = f", trang {page}" if page not in (None, "", "Unknown") else ""
-        sources.append(f"- {filename}{page_label}")
+        owner = str(citation.get("owner") or "").strip()
+        owner_label = f", người tải: {owner}" if owner else ""
+        sources.append(f"- {filename}{page_label}{owner_label}")
     if sources:
         blocks.append("Nguồn:\n" + "\n".join(sources))
     return "\n\n".join(blocks)
@@ -212,7 +214,9 @@ async def create_supervisor_tools(
 
     @tool
     def search_uploaded_documents(query: str) -> str:
-        """Tìm các đoạn liên quan trong tài liệu đã tải của người dùng.
+        """Tìm các đoạn liên quan trong tài liệu người dùng được xem.
+
+        Nhân viên sales chỉ tìm trong tài liệu họ tải lên. Quản lý sales còn tìm trong tài liệu của nhân viên sales cùng tổ chức.
 
         Args:
             query: Câu hỏi hoặc cụm từ cần tìm trong tài liệu.
@@ -246,6 +250,8 @@ async def create_supervisor_tools(
     @tool
     async def query_documents(query: str) -> str:
         """Trả lời câu hỏi về tài liệu đã tải: PDF, Word, PowerPoint, TXT, Markdown, bảng giá, catalogue, hợp đồng.
+
+        Nhân viên sales chỉ dùng tài liệu họ tải lên. Quản lý sales còn dùng tài liệu của nhân viên sales cùng tổ chức.
 
         Args:
             query: Câu hỏi đầy đủ cần tìm trong tài liệu đã tải.
