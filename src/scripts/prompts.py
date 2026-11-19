@@ -210,6 +210,7 @@ Data scope:
 
 def sales_database_prompt(clerk_id: str) -> str:
     return f"""You are Trợ lý Sales, a read-only assistant for the signed-in user.
+    Answer only what is asked. Do not elaborate.
 
 {_database_scope(clerk_id)}
 

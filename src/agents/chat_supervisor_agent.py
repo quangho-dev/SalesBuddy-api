@@ -356,13 +356,46 @@ async def create_chat_supervisor(
     })
 
 
+def _history_content(message) -> str:
+    if isinstance(message, dict):
+        content = message.get("content")
+    else:
+        content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return content
+    return str(content or "")
+
+
+def get_windowed_history(history, max_input_tokens=8000):
+    """Start from the most recent messages and add backwards until we'd exceed max_input_tokens.
+
+    Rough estimate only: 1 token is about 4 characters. The newest message is always
+    kept so the current question still reaches the model.
+    """
+    tokens_per_char = 0.25
+    budget = max_input_tokens
+    selected = []
+
+    for message in reversed(history):
+        estimated_tokens = len(_history_content(message)) * tokens_per_char
+        if budget - estimated_tokens < 0:
+            break
+        budget -= estimated_tokens
+        selected.insert(0, message)
+
+    if history and not selected:
+        return [history[-1]]
+    return selected
+
+
 def _history_messages(clerk_id: str, conversation_id: str, query: str) -> list:
-    """Replay this conversation, then the new question.
+    """Replay the recent part of this conversation, then the new question.
 
     Each turn uses a new checkpoint so this history is not appended twice.
+    Older turns are dropped once the estimated token budget is full.
     """
     messages = []
-    for row in list_chat_messages(clerk_id, conversation_id, limit=40):
+    for row in list_chat_messages(clerk_id, conversation_id):
         content = (row.get("content") or "").strip()
         if not content:
             continue
@@ -371,7 +404,7 @@ def _history_messages(clerk_id: str, conversation_id: str, query: str) -> list:
         else:
             messages.append(HumanMessage(content))
     messages.append(HumanMessage(query))
-    return messages
+    return get_windowed_history(messages)
 
 
 async def _prepare_supervisor(
