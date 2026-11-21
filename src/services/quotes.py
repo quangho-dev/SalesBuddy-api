@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import re
 
 from src.services.customers import get_customer, owner_email_by_id, visible_owner_ids
 from src.services.orders import create_order, find_order_for_quote, get_order
@@ -24,6 +25,7 @@ ITEM_FIELDS = (
     "notes",
 )
 VAT_RATE = 0.1
+_QUOTE_CODE = re.compile(r"^BG-(\d+)$", re.IGNORECASE)
 
 
 class QuoteNotFoundError(LookupError):
@@ -126,6 +128,7 @@ def _format_quote(row: dict) -> dict:
         {field: item.get(field) for field in ITEM_FIELDS} for item in items
     ]
     row["order_id"] = _linked_order_id(row)
+    row["quote_code"] = _text(row.get("quote_code"))
     events = row.pop("quote_status_events", None) or []
     row["status_events"] = sorted(
         events,
@@ -185,6 +188,30 @@ def _owned_customer(customer_id: str, clerk_id: str) -> dict:
     return get_customer(customer_id, clerk_id)
 
 
+def _next_quote_code(clerk_id: str) -> str:
+    highest = 0
+    start = 0
+    page_size = 1000
+    while True:
+        result = (
+            supabase.table(TABLE)
+            .select("quote_code")
+            .eq("clerk_id", clerk_id)
+            .order("id")
+            .range(start, start + page_size - 1)
+            .execute()
+        )
+        rows = result.data or []
+        for row in rows:
+            match = _QUOTE_CODE.match(_text(row.get("quote_code")))
+            if match:
+                highest = max(highest, int(match.group(1)))
+        if len(rows) < page_size:
+            break
+        start += page_size
+    return f"BG-{highest + 1:05d}"
+
+
 def create_quote(clerk_id: str, payload: dict) -> dict:
     ensure_user(clerk_id)
     customer_id = str(payload.get("customer_id") or "").strip()
@@ -198,6 +225,7 @@ def create_quote(clerk_id: str, payload: dict) -> dict:
             {
                 "clerk_id": clerk_id,
                 "customer_id": customer_id,
+                "quote_code": _next_quote_code(clerk_id),
                 "notes": _text(payload.get("notes")),
                 **_totals(items),
             }

@@ -1,4 +1,6 @@
 import os
+import re
+from typing import Any
 import uuid
 from collections.abc import AsyncIterator
 
@@ -20,6 +22,7 @@ from src.scripts.prompts import (
     sales_database_prompt,
 )
 from src.scripts.utils import load_mcp_config
+from src.services.ExactResponseCache import ExactResponseCache
 from src.services.chatHistory import (
     discard_chat_thread,
     list_chat_messages,
@@ -29,6 +32,7 @@ from src.services.chatHistory import (
 from src.services.googleSheetsAuth import sheets_connection_status
 
 checkpointer = InMemorySaver()
+response_cache = ExactResponseCache()
 model = ChatOpenAI(
     model="gpt-6-astra",
     use_responses_api=True,
@@ -41,6 +45,41 @@ def _error_text(exc: BaseException) -> str:
     if exceptions:
         return "; ".join(_error_text(item) for item in exceptions)
     return str(exc)
+
+
+def _estimated_tokens(text: str) -> int:
+    return int(len(text) * 0.25)
+
+
+def _cache_prompt(clerk_id: str, system_prompt: str) -> str:
+    return f"{clerk_id}\n{system_prompt}"
+
+
+def _cache_question(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _cached_response(system_prompt: str, user_message: str) -> str | None:
+    cached = response_cache.get(system_prompt, user_message)
+    if not cached:
+        return None
+    text = str(cached.get("text") or "").strip()
+    return text or None
+
+
+def _remember_response(system_prompt: str, user_message: str, response_text: str) -> str:
+    text = response_text.strip()
+    if not text:
+        return response_text
+    response_cache.set(
+        system_prompt,
+        user_message,
+        text,
+        _estimated_tokens(system_prompt) + _estimated_tokens(user_message),
+        _estimated_tokens(text),
+        0.0,
+    )
+    return text
 
 
 _TOOL_STATUS = {
@@ -338,11 +377,7 @@ async def create_chat_supervisor(
     excerpts_out: list | None = None,
 ):
     """Supervisor that delegates database, document, spreadsheet, and web questions."""
-    selected_names = None
-    if document_ids is not None:
-        selected_names = [
-            row["filename"] for row in get_ready_documents(clerk_id, document_ids)
-        ]
+    selected_names = _selected_document_names(clerk_id, document_ids)
     supervisor_tools = await create_supervisor_tools(clerk_id, document_ids, excerpts_out)
     return create_agent(
         model=model,
@@ -407,6 +442,21 @@ def _history_messages(clerk_id: str, conversation_id: str, query: str) -> list:
     return get_windowed_history(messages)
 
 
+def _selected_document_names(
+    clerk_id: str, document_ids: list[str] | None
+) -> list[str] | None:
+    if document_ids is None:
+        return None
+    return [row["filename"] for row in get_ready_documents(clerk_id, document_ids)]
+
+
+def _cache_user_message(messages: list) -> str:
+    for message in reversed[Any](messages):
+        if isinstance(message, AIMessage):
+            continue
+        return _cache_question(_history_content(message))
+    return ""
+
 async def _prepare_supervisor(
     clerk_id: str,
     document_ids: list[str] | None = None,
@@ -434,8 +484,25 @@ async def stream_chat_supervisor(
     }
     yield {"type": "status", "text": "Đang xử lý..."}
     excerpts: list[dict] = []
-    supervisor, config = await _prepare_supervisor(clerk_id, document_ids, excerpts)
     prior_messages = _history_messages(clerk_id, thread["id"], query)
+    system_prompt = chat_supervisor_prompt(
+        _selected_document_names(clerk_id, document_ids)
+    )
+    cache_prompt = _cache_prompt(clerk_id, system_prompt)
+    user_message = _cache_user_message(prior_messages)
+    cached = _cached_response(cache_prompt, user_message)
+    if cached:
+        saved = save_chat_exchange(clerk_id, thread["id"], query, cached, [])
+        yield {"type": "delta", "text": cached}
+        yield {
+            "type": "thread",
+            "id": saved["id"],
+            "title": saved["title"],
+            "updated_at": saved["updated_at"],
+        }
+        return
+    excerpts: list[dict] = []
+    supervisor, config = await _prepare_supervisor(clerk_id, document_ids, excerpts)
     parts: list[str] = []
     try:
         async for event in _stream_supervisor_turn(supervisor, config, prior_messages):
@@ -447,6 +514,8 @@ async def stream_chat_supervisor(
             discard_chat_thread(clerk_id, thread["id"])
         raise
     reply = "".join(parts).strip()
+    if reply:
+        _remember_response(cache_prompt, user_message, reply)
     if reply and excerpts:
         yield {"type": "citations", "items": excerpts}
     if reply:
