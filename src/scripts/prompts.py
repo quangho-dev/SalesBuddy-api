@@ -217,6 +217,9 @@ def sales_database_prompt(clerk_id: str) -> str:
 Use the database tools to inspect the schema and run SQL before answering any question about customers, products, quotes, orders, payments, debts, or stock. Do not invent numbers, names, or dates. Do not mention Supabase to the user; call it Database.
 
 - Product sales use order_items.product_id joined to products.id. order_items.product_code is the product code saved on the line. Lines with a null product_id are custom items and are not a catalog product.
+- orders.order_code is the order code, formatted DH-00001. quotes.quote_code is the quote code, formatted BG-00001. Match either code without case sensitivity after trimming spaces. A code that starts with DH- is always an order, even when the user calls it a báo giá. A code that starts with BG- is always a quote.
+- When the user names a quote code, load that quote with quotes.quote_code inside the allowed clerk_id scope, then load its quote_items. When the user names an order code while asking about its quote, find that order by order_code, then open the quote whose id equals orders.quote_id. If quote_id is null, say that order has no linked quote.
+- To check whether a quote's prices match earlier orders, compare each quote_items.selling_price with order_items.selling_price on earlier official orders for the same customer_id. Official means orders.status is official or blank. Use orders.order_date, and exclude the order whose quote_id is this quote. Match lines by product name, ignoring case and repeated spaces. Quote lines have no product id. For each line, say whether the price matches and show both prices in VND. If that customer has no earlier official order for the product, say there is no earlier order to compare and still show the quoted price. Do not call that a wrong price.
 - Do not insert, update, or delete. If the user asks to change data, say this assistant can only look it up.
 - Reply in the same language as the user.
 - Summarize the answer. Do not paste a huge raw table. Show money in VND and dates as dd/mm/yyyy.
@@ -289,6 +292,7 @@ Cách làm:
 - Khi người dùng nhắc tài liệu, file đã tải, PDF, catalogue hoặc hợp đồng, dùng query_documents.
 - Khi người dùng nhắc sheet, bảng tính, spreadsheet hoặc file Google, dùng query_google_sheets.
 - Câu hỏi về khách hàng, sản phẩm, báo giá, đơn hàng, công nợ hoặc tồn kho trong ứng dụng chỉ dùng query_supabase. Quản lý sales được xem khách hàng, báo giá, đơn hàng, công nợ và tài liệu của nhân viên sales cùng tổ chức. Nhân viên sales chỉ xem dữ liệu và tài liệu do chính họ tạo hoặc tải lên.
+- Mã đơn hàng có dạng DH-00001. Mã báo giá có dạng BG-00001. Khi người dùng nói báo giá kèm mã DH-, đó là mã đơn: query_supabase phải tìm đơn đó, rồi lấy báo giá liên kết qua orders.quote_id và so giá dòng báo giá với các đơn chính thức trước đó của cùng khách hàng.
 - Câu hỏi về thông tin bên ngoài ứng dụng dùng query_web. Không dùng query_web để thay cho dữ liệu trong database.
 - Nếu query_google_sheets báo chưa đăng nhập, nói người dùng đăng nhập lại Google Sheets. Không để lỗi đó chặn câu trả lời từ database, tài liệu hoặc web.
 {selection}"""

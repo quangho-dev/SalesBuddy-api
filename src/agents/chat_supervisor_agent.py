@@ -451,7 +451,7 @@ def _selected_document_names(
 
 
 def _cache_user_message(messages: list) -> str:
-    for message in reversed[Any](messages):
+    for message in reversed(messages):
         if isinstance(message, AIMessage):
             continue
         return _cache_question(_history_content(message))
